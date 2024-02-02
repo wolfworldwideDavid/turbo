@@ -1,31 +1,32 @@
 use anyhow::Result;
-use turbo_tasks::primitives::StringVc;
-use turbo_tasks_fs::FileSystemPathVc;
-use turbopack::resolve_options_context::ResolveOptionsContextVc;
+use turbo_tasks::{Value, Vc};
+use turbo_tasks_fs::FileSystemPath;
+use turbopack::resolve_options_context::ResolveOptionsContext;
 use turbopack_core::{
-    issue::{Issue, IssueSeverity, IssueSeverityVc, IssueVc},
-    resolve::parse::RequestVc,
+    issue::{Issue, IssueExt, IssueSeverity, OptionStyledString, StyledString},
+    reference_type::{CommonJsReferenceSubType, ReferenceType},
+    resolve::parse::Request,
 };
 use turbopack_ecmascript::resolve::apply_cjs_specific_options;
 
 #[turbo_tasks::function]
-fn react_refresh_request() -> RequestVc {
-    RequestVc::parse_string("@next/react-refresh-utils/dist/runtime".to_string())
+fn react_refresh_request() -> Vc<Request> {
+    Request::parse_string("@next/react-refresh-utils/dist/runtime".to_string())
 }
 
 #[turbo_tasks::function]
-fn react_refresh_request_in_next() -> RequestVc {
-    RequestVc::parse_string("next/dist/compiled/@next/react-refresh-utils/dist/runtime".to_string())
+fn react_refresh_request_in_next() -> Vc<Request> {
+    Request::parse_string("next/dist/compiled/@next/react-refresh-utils/dist/runtime".to_string())
 }
 
 #[turbo_tasks::value]
 pub enum ResolveReactRefreshResult {
     NotFound,
-    Found(RequestVc),
+    Found(Vc<Request>),
 }
 
 impl ResolveReactRefreshResult {
-    pub fn as_request(&self) -> Option<RequestVc> {
+    pub fn as_request(&self) -> Option<Vc<Request>> {
         match self {
             ResolveReactRefreshResult::NotFound => None,
             ResolveReactRefreshResult::Found(r) => Some(*r),
@@ -43,56 +44,70 @@ impl ResolveReactRefreshResult {
 /// given path. Emits an issue if we can't.
 #[turbo_tasks::function]
 pub async fn assert_can_resolve_react_refresh(
-    path: FileSystemPathVc,
-    resolve_options_context: ResolveOptionsContextVc,
-) -> Result<ResolveReactRefreshResultVc> {
+    path: Vc<FileSystemPath>,
+    resolve_options_context: Vc<ResolveOptionsContext>,
+) -> Result<Vc<ResolveReactRefreshResult>> {
     let resolve_options =
         apply_cjs_specific_options(turbopack::resolve_options(path, resolve_options_context));
     for request in [react_refresh_request_in_next(), react_refresh_request()] {
-        let result = turbopack_core::resolve::resolve(path, request, resolve_options).first_asset();
+        let result = turbopack_core::resolve::resolve(
+            path,
+            Value::new(ReferenceType::CommonJs(CommonJsReferenceSubType::Undefined)),
+            request,
+            resolve_options,
+        )
+        .first_source();
 
         if result.await?.is_some() {
             return Ok(ResolveReactRefreshResult::Found(request).cell());
         }
     }
-    ReactRefreshResolvingIssue { path }.cell().as_issue().emit();
+    ReactRefreshResolvingIssue { path }.cell().emit();
     Ok(ResolveReactRefreshResult::NotFound.cell())
 }
 
 /// An issue that occurred while resolving the React Refresh runtime module.
 #[turbo_tasks::value(shared)]
 pub struct ReactRefreshResolvingIssue {
-    path: FileSystemPathVc,
+    path: Vc<FileSystemPath>,
 }
 
 #[turbo_tasks::value_impl]
 impl Issue for ReactRefreshResolvingIssue {
     #[turbo_tasks::function]
-    fn severity(&self) -> IssueSeverityVc {
+    fn severity(&self) -> Vc<IssueSeverity> {
         IssueSeverity::Warning.into()
     }
 
     #[turbo_tasks::function]
-    fn title(&self) -> StringVc {
-        StringVc::cell("Could not resolve React Refresh runtime".to_string())
+    fn title(&self) -> Vc<StyledString> {
+        StyledString::Text("Could not resolve React Refresh runtime".to_string()).cell()
     }
 
     #[turbo_tasks::function]
-    fn category(&self) -> StringVc {
-        StringVc::cell("other".to_string())
+    fn category(&self) -> Vc<String> {
+        Vc::cell("other".to_string())
     }
 
     #[turbo_tasks::function]
-    fn context(&self) -> FileSystemPathVc {
+    fn file_path(&self) -> Vc<FileSystemPath> {
         self.path
     }
 
     #[turbo_tasks::function]
-    fn description(&self) -> StringVc {
-        StringVc::cell(
-            "React Refresh will be disabled.\nTo enable React Refresh, install the \
-             `react-refresh` and `@next/react-refresh-utils` modules."
-                .to_string(),
-        )
+    fn description(&self) -> Vc<OptionStyledString> {
+        Vc::cell(Some(
+            StyledString::Line(vec![
+                StyledString::Text(
+                    "React Refresh will be disabled.\nTo enable React Refresh, install the "
+                        .to_string(),
+                ),
+                StyledString::Code("react-refresh".to_string()),
+                StyledString::Text(" and ".to_string()),
+                StyledString::Code("@next/react-refresh-utils".to_string()),
+                StyledString::Text(" modules.".to_string()),
+            ])
+            .cell(),
+        ))
     }
 }

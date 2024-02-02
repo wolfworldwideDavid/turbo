@@ -2,43 +2,37 @@ use std::io::Write as _;
 
 use anyhow::Result;
 use indexmap::IndexMap;
-use turbo_tasks::{
-    primitives::{StringVc, U64Vc},
-    TryJoinIterExt, Value, ValueToString,
-};
+use tracing::{info_span, Instrument};
+use turbo_tasks::{ReadRef, TryJoinIterExt, ValueToString, Vc};
 use turbopack_core::{
-    chunk::{availability_info::AvailabilityInfo, ChunkItem, ModuleIdReadRef},
-    code_builder::{CodeBuilder, CodeVc},
+    chunk::{AsyncModuleInfo, ChunkItem, ChunkItemExt, ModuleId},
+    code_builder::{Code, CodeBuilder},
     error::PrettyPrintError,
-    issue::{code_gen::CodeGenerationIssue, IssueSeverity},
+    issue::{code_gen::CodeGenerationIssue, IssueExt, IssueSeverity, StyledString},
 };
 use turbopack_ecmascript::chunk::{
-    EcmascriptChunkContentVc, EcmascriptChunkItem, EcmascriptChunkItemVc,
+    EcmascriptChunkContent, EcmascriptChunkItem, EcmascriptChunkItemExt,
 };
-
-use crate::ecmascript::module_factory::module_factory;
 
 /// A chunk item's content entry.
 ///
-/// Instead of storing the [`EcmascriptChunkItemVc`] itself from which `code`
-/// and `hash` are derived, we store `Vc`s directly. This avoids creating tasks
-/// in a hot loop when iterating over thousands of entries when computing
-/// updates.
+/// Instead of storing the [`Vc<Box<dyn EcmascriptChunkItem>>`] itself from
+/// which `code` and `hash` are derived, we store `Vc`s directly. This avoids
+/// creating tasks in a hot loop when iterating over thousands of entries when
+/// computing updates.
 #[turbo_tasks::value]
 #[derive(Debug)]
-pub(super) struct EcmascriptDevChunkContentEntry {
-    pub code: CodeVc,
-    pub hash: U64Vc,
+pub struct EcmascriptDevChunkContentEntry {
+    pub code: Vc<Code>,
+    pub hash: Vc<u64>,
 }
 
 impl EcmascriptDevChunkContentEntry {
     pub async fn new(
-        chunk_item: EcmascriptChunkItemVc,
-        availability_info: AvailabilityInfo,
+        chunk_item: Vc<Box<dyn EcmascriptChunkItem>>,
+        async_module_info: Option<Vc<AsyncModuleInfo>>,
     ) -> Result<Self> {
-        let code = item_code(chunk_item, Value::new(availability_info))
-            .resolve()
-            .await?;
+        let code = chunk_item.code(async_module_info).resolve().await?;
         Ok(EcmascriptDevChunkContentEntry {
             code,
             hash: code.source_code_hash().resolve().await?,
@@ -47,44 +41,52 @@ impl EcmascriptDevChunkContentEntry {
 }
 
 #[turbo_tasks::value(transparent)]
-pub(super) struct EcmascriptDevChunkContentEntries(
-    IndexMap<ModuleIdReadRef, EcmascriptDevChunkContentEntry>,
+pub struct EcmascriptDevChunkContentEntries(
+    IndexMap<ReadRef<ModuleId>, EcmascriptDevChunkContentEntry>,
 );
 
 #[turbo_tasks::value_impl]
-impl EcmascriptDevChunkContentEntriesVc {
+impl EcmascriptDevChunkContentEntries {
     #[turbo_tasks::function]
     pub async fn new(
-        chunk_content: EcmascriptChunkContentVc,
-    ) -> Result<EcmascriptDevChunkContentEntriesVc> {
+        chunk_content: Vc<EcmascriptChunkContent>,
+    ) -> Result<Vc<EcmascriptDevChunkContentEntries>> {
         let chunk_content = chunk_content.await?;
-        let availability_info = chunk_content.availability_info;
 
         let entries: IndexMap<_, _> = chunk_content
             .chunk_items
             .iter()
-            .map(|chunk_item| async move {
-                Ok((
-                    chunk_item.id().await?,
-                    EcmascriptDevChunkContentEntry::new(*chunk_item, availability_info).await?,
+            .map(|&(chunk_item, async_module_info)| async move {
+                async move {
+                    Ok((
+                        chunk_item.id().await?,
+                        EcmascriptDevChunkContentEntry::new(chunk_item, async_module_info).await?,
+                    ))
+                }
+                .instrument(info_span!(
+                    "chunk item",
+                    name = display(chunk_item.asset_ident().to_string().await?)
                 ))
+                .await
             })
             .try_join()
             .await?
             .into_iter()
             .collect();
 
-        Ok(EcmascriptDevChunkContentEntriesVc::cell(entries))
+        Ok(Vc::cell(entries))
     }
 }
 
 #[turbo_tasks::function]
 async fn item_code(
-    item: EcmascriptChunkItemVc,
-    availability_info: Value<AvailabilityInfo>,
-) -> Result<CodeVc> {
+    item: Vc<Box<dyn EcmascriptChunkItem>>,
+    async_module_info: Option<Vc<AsyncModuleInfo>>,
+) -> Result<Vc<Code>> {
     Ok(
-        match module_factory(item.content_with_availability_info(availability_info))
+        match item
+            .content_with_async_module_info(async_module_info)
+            .module_factory()
             .resolve()
             .await
         {
@@ -98,14 +100,15 @@ async fn item_code(
                 ));
                 let error_message = format!("{}", PrettyPrintError(&error));
                 let js_error_message = serde_json::to_string(&error_message)?;
-                let issue = CodeGenerationIssue {
+                CodeGenerationIssue {
                     severity: IssueSeverity::Error.cell(),
                     path: item.asset_ident().path(),
-                    title: StringVc::cell("Code generation for chunk item errored".to_string()),
-                    message: StringVc::cell(error_message),
+                    title: StyledString::Text("Code generation for chunk item errored".to_string())
+                        .cell(),
+                    message: StyledString::Text(error_message).cell(),
                 }
-                .cell();
-                issue.as_issue().emit();
+                .cell()
+                .emit();
                 let mut code = CodeBuilder::default();
                 code += "(() => {{\n\n";
                 writeln!(code, "throw new Error({error});", error = &js_error_message)?;

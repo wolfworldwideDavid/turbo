@@ -1,3 +1,4 @@
+import copy from "copy-to-clipboard";
 import {
   VercelLogo,
   TurborepoLogo,
@@ -7,11 +8,8 @@ import {
   DesignSystemLogo,
 } from "./icons";
 import type { ContextItem, ContextList } from "./types";
-import copy from "copy-to-clipboard";
 
-export const PLATFORM_MENU_ITEMS = ({
-  theme,
-}: ContextList): Array<ContextItem> => [
+export const PLATFORM_MENU_ITEMS = ({ theme }: ContextList): ContextItem[] => [
   {
     name: "copy-logo",
     "aria-label": "Copy Logo as SVG to Clipboard",
@@ -59,9 +57,15 @@ export const PLATFORM_MENU_ITEMS = ({
   },
 ];
 
-export const PRODUCT_MENU_ITEMS = ({
-  site,
-}: ContextList): Array<ContextItem> => [
+export const PRODUCT_MENU_ITEMS = ({ site }: ContextList): ContextItem[] => [
+  {
+    name: "vercel",
+    "aria-label": "Open Vercel Home in New Tab",
+    children: "Vercel",
+    prefix: <VercelLogo className="mr-3 h-4 w-4" />,
+    type: "external",
+    href: "https://vercel.com",
+  },
   {
     name: "next-js",
     "aria-label": "Open Next.js Home in New Tab",

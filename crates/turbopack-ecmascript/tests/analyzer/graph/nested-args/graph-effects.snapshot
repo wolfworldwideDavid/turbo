@@ -2,7 +2,7 @@
     Call {
         func: Variable(
             (
-                Atom('x' type=static),
+                "x",
                 #2,
             ),
         ),
@@ -69,7 +69,7 @@
             3,
             Variable(
                 (
-                    Atom('x' type=static),
+                    "x",
                     #2,
                 ),
             ),
@@ -135,10 +135,11 @@
     Conditional {
         condition: Binary(
             3,
-            Unknown(
-                None,
-                "unsupported expression",
-            ),
+            Unknown {
+                original_value: None,
+                reason: "unsupported expression",
+                has_side_effects: true,
+            },
             StrictEqual,
             Constant(
                 Num(
@@ -190,7 +191,7 @@
                     Call {
                         func: Variable(
                             (
-                                Atom('r' type=inline),
+                                "r",
                                 #2,
                             ),
                         ),
@@ -201,7 +202,7 @@
                                     [
                                         Variable(
                                             (
-                                                Atom('a' type=static),
+                                                "a",
                                                 #6,
                                             ),
                                         ),
@@ -366,7 +367,7 @@
     Call {
         func: Variable(
             (
-                Atom('r' type=inline),
+                "r",
                 #2,
             ),
         ),
@@ -422,7 +423,7 @@
     Call {
         func: Variable(
             (
-                Atom('inner' type=inline),
+                "inner",
                 #9,
             ),
         ),
@@ -431,7 +432,7 @@
                 Constant(
                     Str(
                         Word(
-                            Atom('b' type=static),
+                            "b",
                         ),
                     ),
                 ),
@@ -487,7 +488,7 @@
     Call {
         func: Variable(
             (
-                Atom('outer' type=inline),
+                "outer",
                 #2,
             ),
         ),
@@ -496,7 +497,7 @@
                 Constant(
                     Str(
                         Word(
-                            Atom('a' type=static),
+                            "a",
                         ),
                     ),
                 ),

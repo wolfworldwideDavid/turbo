@@ -2,61 +2,45 @@
     (
         "*anonymous function 170*",
         Function(
-            5,
+            3,
             170,
-            Alternatives(
-                4,
-                [
-                    Constant(
-                        Undefined,
+            Array {
+                total_nodes: 2,
+                items: [
+                    Variable(
+                        (
+                            "file",
+                            #4,
+                        ),
                     ),
-                    Array {
-                        total_nodes: 2,
-                        items: [
-                            Variable(
-                                (
-                                    Atom('file' type=static),
-                                    #4,
-                                ),
-                            ),
-                        ],
-                        mutable: true,
-                    },
                 ],
-            ),
+                mutable: true,
+            },
         ),
     ),
     (
         "*anonymous function 254*",
         Function(
-            7,
+            5,
             254,
-            Alternatives(
-                6,
-                [
-                    Constant(
-                        Undefined,
+            MemberCall(
+                4,
+                FreeVar(
+                    "require",
+                ),
+                Constant(
+                    Str(
+                        Atom(
+                            "resolve",
+                        ),
                     ),
-                    MemberCall(
-                        4,
-                        FreeVar(
-                            Atom('require' type=static),
+                ),
+                [
+                    Variable(
+                        (
+                            "file",
+                            #5,
                         ),
-                        Constant(
-                            Str(
-                                Word(
-                                    Atom('resolve' type=inline),
-                                ),
-                            ),
-                        ),
-                        [
-                            Variable(
-                                (
-                                    Atom('file' type=static),
-                                    #5,
-                                ),
-                            ),
-                        ],
                     ),
                 ],
             ),
@@ -65,21 +49,13 @@
     (
         "*anonymous function 88*",
         Function(
-            4,
+            2,
             88,
-            Alternatives(
-                3,
-                [
-                    Constant(
-                        Undefined,
-                    ),
-                    Variable(
-                        (
-                            Atom('file' type=static),
-                            #3,
-                        ),
-                    ),
-                ],
+            Variable(
+                (
+                    "file",
+                    #3,
+                ),
             ),
         ),
     ),
@@ -91,14 +67,14 @@
                 Constant(
                     Str(
                         Word(
-                            Atom('../lib/a.js' type=dynamic),
+                            "../lib/a.js",
                         ),
                     ),
                 ),
                 Constant(
                     Str(
                         Word(
-                            Atom('../lib/b.js' type=dynamic),
+                            "../lib/b.js",
                         ),
                     ),
                 ),
@@ -116,14 +92,14 @@
                     Constant(
                         Str(
                             Word(
-                                Atom('../lib/a.js' type=dynamic),
+                                "../lib/a.js",
                             ),
                         ),
                     ),
                     Constant(
                         Str(
                             Word(
-                                Atom('../lib/b.js' type=dynamic),
+                                "../lib/b.js",
                             ),
                         ),
                     ),
@@ -132,15 +108,15 @@
             },
             Constant(
                 Str(
-                    Word(
-                        Atom('map' type=static),
+                    Atom(
+                        "map",
                     ),
                 ),
             ),
             [
                 Variable(
                     (
-                        Atom('*anonymous function 88*' type=dynamic),
+                        "*anonymous function 88*",
                         #0,
                     ),
                 ),
@@ -157,14 +133,14 @@
                     Constant(
                         Str(
                             Word(
-                                Atom('../lib/a.js' type=dynamic),
+                                "../lib/a.js",
                             ),
                         ),
                     ),
                     Constant(
                         Str(
                             Word(
-                                Atom('../lib/b.js' type=dynamic),
+                                "../lib/b.js",
                             ),
                         ),
                     ),
@@ -173,15 +149,15 @@
             },
             Constant(
                 Str(
-                    Word(
-                        Atom('map' type=static),
+                    Atom(
+                        "map",
                     ),
                 ),
             ),
             [
                 Variable(
                     (
-                        Atom('*anonymous function 170*' type=dynamic),
+                        "*anonymous function 170*",
                         #0,
                     ),
                 ),
@@ -198,14 +174,14 @@
                     Constant(
                         Str(
                             Word(
-                                Atom('../lib/a.js' type=dynamic),
+                                "../lib/a.js",
                             ),
                         ),
                     ),
                     Constant(
                         Str(
                             Word(
-                                Atom('../lib/b.js' type=dynamic),
+                                "../lib/b.js",
                             ),
                         ),
                     ),
@@ -214,15 +190,15 @@
             },
             Constant(
                 Str(
-                    Word(
-                        Atom('map' type=static),
+                    Atom(
+                        "map",
                     ),
                 ),
             ),
             [
                 Variable(
                     (
-                        Atom('*anonymous function 254*' type=dynamic),
+                        "*anonymous function 254*",
                         #0,
                     ),
                 ),
@@ -260,34 +236,26 @@
     (
         "func",
         Function(
-            7,
+            5,
             308,
-            Alternatives(
-                6,
-                [
-                    Constant(
-                        Undefined,
+            MemberCall(
+                4,
+                FreeVar(
+                    "require",
+                ),
+                Constant(
+                    Str(
+                        Atom(
+                            "resolve",
+                        ),
                     ),
-                    MemberCall(
-                        4,
-                        FreeVar(
-                            Atom('require' type=static),
+                ),
+                [
+                    Variable(
+                        (
+                            "file",
+                            #6,
                         ),
-                        Constant(
-                            Str(
-                                Word(
-                                    Atom('resolve' type=inline),
-                                ),
-                            ),
-                        ),
-                        [
-                            Variable(
-                                (
-                                    Atom('file' type=static),
-                                    #6,
-                                ),
-                            ),
-                        ],
                     ),
                 ],
             ),

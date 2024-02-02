@@ -1,12 +1,12 @@
+import type { MouseEvent } from "react";
 import { useEffect, useCallback, useState, useRef } from "react";
 import { useTheme } from "nextra-theme-docs";
 import Link from "next/link";
 import classNames from "classnames";
+import { useTurboSite } from "../SiteSwitcher";
 import { VercelLogo } from "./icons";
 import { PRODUCT_MENU_ITEMS, PLATFORM_MENU_ITEMS } from "./items";
 import type { MenuItemProps } from "./types";
-import { MouseEvent } from "react";
-import { useTurboSite } from "../SiteSwitcher";
 
 function MenuDivider({ children, ...other }: { children: string }) {
   return (
@@ -41,7 +41,7 @@ function MenuItem({
     if (type === "copy") {
       setCopied(true);
     } else {
-      closeMenu();
+      closeMenu?.();
     }
   };
 
@@ -49,9 +49,11 @@ function MenuItem({
     if (copied) {
       const timeout = setTimeout(() => {
         setCopied(false);
-        closeMenu();
+        closeMenu?.();
       }, 2000);
-      return () => clearTimeout(timeout);
+      return () => {
+        clearTimeout(timeout);
+      };
     }
   }, [copied, closeMenu]);
 
@@ -59,9 +61,11 @@ function MenuItem({
     className,
     "group flex items-center px-4 py-2 text-sm dark:hover:bg-gray-800 hover:bg-gray-200 w-full rounded-md"
   );
+
   if (type === "internal") {
     return (
-      <Link className={classes} href={href} onClick={handleClick} {...other}>
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- Going to allow it here...but it's not truly correct.
+      <Link className={classes} href={href!} onClick={handleClick} {...other}>
         {prefix}
         {children}
       </Link>
@@ -70,11 +74,11 @@ function MenuItem({
   if (type === "external") {
     return (
       <a
+        className={classes}
         href={href}
         onClick={handleClick}
-        target="_blank"
         rel="noopener noreferrer"
-        className={classes}
+        target="_blank"
         {...other}
       >
         {prefix}
@@ -83,25 +87,26 @@ function MenuItem({
     );
   }
 
-  if (type === "copy") {
-    return (
-      <button
-        onClick={handleClick}
-        className={classes}
-        disabled={disabled}
-        {...other}
-      >
-        {prefix}
-        {copied ? "Copied to clipboard!" : children}
-      </button>
-    );
-  }
+  // Copy button
+  return (
+    <button
+      className={classes}
+      disabled={disabled}
+      onClick={handleClick}
+      type="button"
+      {...other}
+    >
+      {prefix}
+      {copied ? "Copied to clipboard!" : children}
+    </button>
+  );
 }
 
 export function LogoContext() {
   const [open, setOpen] = useState(false);
-  const site = useTurboSite();
-  const menu = useRef(null);
+  // By default, the repo logo is used.
+  const site = useTurboSite() || "repo";
+  const menu = useRef<HTMLDivElement | null>(null);
   const { theme = "dark" } = useTheme();
 
   const toggleMenu = (e: MouseEvent<HTMLButtonElement>) => {
@@ -116,6 +121,7 @@ export function LogoContext() {
 
   const onClickOutside: EventListener = useCallback(
     (e) => {
+      // @ts-expect-error -- Event listener typing is weird.
       if (menu.current && open && !menu.current.contains(e.target)) {
         setOpen(false);
       }
@@ -132,20 +138,27 @@ export function LogoContext() {
 
   return (
     <div className="block relative">
-      <button onClick={toggleMenu} onContextMenu={toggleMenu} className="flex">
+      <button
+        className="flex"
+        onClick={toggleMenu}
+        onContextMenu={toggleMenu}
+        type="button"
+      >
         <VercelLogo />
       </button>
-      {open && (
+      {open ? (
         <div
-          ref={menu}
           className="absolute border dark:border-gray-700 left-6 z-10 mt-2 w-60 origin-top-right divide-y divide-gray-100 rounded-md bg-white dark:bg-black shadow-sm focus:outline-none"
+          ref={menu}
         >
           <div className="p-2">
             <MenuDivider>Platform</MenuDivider>
             {PLATFORM_MENU_ITEMS({ theme, site }).map((item) => (
               <MenuItem
+                closeMenu={() => {
+                  setOpen(false);
+                }}
                 key={item.name}
-                closeMenu={() => setOpen(false)}
                 {...item}
               >
                 {item.children}
@@ -154,8 +167,10 @@ export function LogoContext() {
             <MenuDivider>Products</MenuDivider>
             {PRODUCT_MENU_ITEMS({ theme, site }).map((item) => (
               <MenuItem
+                closeMenu={() => {
+                  setOpen(false);
+                }}
                 key={item.name}
-                closeMenu={() => setOpen(false)}
                 {...item}
               >
                 {item.children}
@@ -163,7 +178,7 @@ export function LogoContext() {
             ))}
           </div>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

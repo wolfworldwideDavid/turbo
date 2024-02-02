@@ -1,16 +1,19 @@
 name: "Turbo Rust Setup"
 description: "Sets up the Rust toolchain for CI"
 inputs:
-  target:
-    description: "Compilation target"
-    required: true
+  windows:
+    description: 'Set to "true" if setting up for Windows'
+    required: false
+    default: "false"
   targets:
     description: "Comma-separated list of target triples to install for this toolchain"
     required: false
   components:
     description: "Comma-separated list of components to be additionally installed"
     required: false
-
+  github-token:
+    description: "GitHub token. You can pass secrets.GITHUB_TOKEN"
+    required: true
   shared-cache-key:
     description: "A cache key that is used instead of the automatic `job`-based key, and is stable over multiple jobs."
     required: false
@@ -21,10 +24,6 @@ inputs:
     description: "Determiners whether the cache should be saved. If `false`, the cache is only restored."
     required: false
     default: "false"
-  install-cargo-sweep:
-    description: "Whether to install cargo-sweep"
-    required: false
-    default: true
 
 runs:
   using: "composite"
@@ -52,13 +51,30 @@ runs:
         components: ${{ inputs.components }}
 
     - name: "Set Windows default host to MinGW"
-      if: ${{ inputs.target == 'windows' }}
+      if: ${{ inputs.windows == 'true' }}
       shell: bash
       run: rustup set default-host x86_64-pc-windows-gnu && rustup show
+
+    - name: Set Up Protoc
+      id: set-up-protoc
+      continue-on-error: true
+      uses: arduino/setup-protoc@v1.2.0
+      with:
+        version: "3.x"
+        repo-token: ${{ inputs.github-token }}
+
+    - name: Set Up Protoc (second try)
+      if: steps.set-up-protoc.outcome == 'failure'
+      uses: arduino/setup-protoc@v1.2.0
+      with:
+        version: "3.x"
+        repo-token: ${{ inputs.github-token }}
 
     - name: "Add cargo problem matchers"
       shell: bash
       run: echo "::add-matcher::${{ github.action_path }}/matchers.json"
+
+    - uses: rui314/setup-mold@v1
 
     - name: "Setup Rust Cache"
       uses: Swatinem/rust-cache@v2
@@ -69,11 +85,9 @@ runs:
         save-if: ${{ github.ref == 'refs/heads/main' && inputs.save-cache || 'false' }}
 
     - name: "Install cargo-sweep"
-      if: ${{ inputs.install-cargo-sweep }} == "true"
-      uses: baptiste0928/cargo-install@v1
+      uses: taiki-e/install-action@v2
       with:
-        crate: cargo-sweep
+        tool: cargo-sweep@0.6.2,cargo-groups
 
     - name: "Run cargo-sweep"
-      if: ${{ inputs.install-cargo-sweep }} == "true"
       uses: ./.github/actions/cargo-sweep

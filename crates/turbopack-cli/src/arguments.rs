@@ -1,4 +1,7 @@
-use std::{net::IpAddr, path::PathBuf};
+use std::{
+    net::IpAddr,
+    path::{Path, PathBuf},
+};
 
 use clap::{Args, Parser};
 use turbopack_cli_utils::issue::IssueSeverityCliOption;
@@ -6,14 +9,30 @@ use turbopack_cli_utils::issue::IssueSeverityCliOption;
 #[derive(Debug, Parser)]
 #[clap(author, version, about, long_about = None)]
 pub enum Arguments {
+    Build(BuildArguments),
     Dev(DevArguments),
 }
 
-#[derive(Debug, Args)]
+impl Arguments {
+    /// The directory of the application. see [CommonArguments]::dir
+    pub fn dir(&self) -> Option<&Path> {
+        match self {
+            Arguments::Build(args) => args.common.dir.as_deref(),
+            Arguments::Dev(args) => args.common.dir.as_deref(),
+        }
+    }
+}
+
+#[derive(Debug, Args, Clone)]
 pub struct CommonArguments {
+    /// The entrypoints of the project. Resolved relative to the project's
+    /// directory (`--dir`).
+    #[clap(value_parser)]
+    pub entries: Option<Vec<String>>,
+
     /// The directory of the application.
     /// If no directory is provided, the current directory will be used.
-    #[clap(value_parser)]
+    #[clap(short, long, value_parser)]
     pub dir: Option<PathBuf>,
 
     /// The root directory of the project. Nothing outside of this directory can
@@ -77,4 +96,15 @@ pub struct DevArguments {
     /// in use.
     #[clap(long)]
     pub allow_retry: bool,
+}
+
+#[derive(Debug, Args)]
+#[clap(author, version, about, long_about = None)]
+pub struct BuildArguments {
+    #[clap(flatten)]
+    pub common: CommonArguments,
+
+    /// Don't minify build output.
+    #[clap(long)]
+    pub no_minify: bool,
 }

@@ -3,22 +3,23 @@ use std::sync::Arc;
 use anyhow::Result;
 use indexmap::{IndexMap, IndexSet};
 use serde::Serialize;
-use turbo_tasks::{IntoTraitRef, TryJoinIterExt};
+use turbo_tasks::{IntoTraitRef, ReadRef, TryJoinIterExt, Vc};
 use turbo_tasks_fs::rope::Rope;
 use turbopack_core::{
-    asset::Asset,
-    chunk::{ChunkingContext, ModuleId, ModuleIdReadRef},
-    code_builder::CodeReadRef,
-    version::{PartialUpdate, TotalUpdate, Update, VersionVc},
+    chunk::{ChunkingContext, ModuleId},
+    code_builder::Code,
+    output::OutputAsset,
+    source_map::GenerateSourceMap,
+    version::{PartialUpdate, TotalUpdate, Update, Version},
 };
 
 use super::{
     super::{
         update::{update_ecmascript_chunk, EcmascriptChunkUpdate},
-        version::EcmascriptDevChunkVersionReadRef,
+        version::EcmascriptDevChunkVersion,
     },
-    content::EcmascriptDevMergedChunkContentVc,
-    version::EcmascriptDevMergedChunkVersionVc,
+    content::EcmascriptDevMergedChunkContent,
+    version::EcmascriptDevMergedChunkVersion,
 };
 
 #[derive(Serialize, Default)]
@@ -26,7 +27,7 @@ use super::{
 struct EcmascriptMergedUpdate<'a> {
     /// A map from module id to latest module entry.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
-    entries: IndexMap<ModuleIdReadRef, EcmascriptModuleEntry>,
+    entries: IndexMap<ReadRef<ModuleId>, EcmascriptModuleEntry>,
     /// A map from chunk path to the chunk update.
     #[serde(skip_serializing_if = "IndexMap::is_empty")]
     chunks: IndexMap<&'a str, EcmascriptMergedChunkUpdate>,
@@ -50,7 +51,7 @@ enum EcmascriptMergedChunkUpdate {
 #[serde(rename_all = "camelCase")]
 struct EcmascriptMergedChunkAdded {
     #[serde(skip_serializing_if = "IndexSet::is_empty")]
-    modules: IndexSet<ModuleIdReadRef>,
+    modules: IndexSet<ReadRef<ModuleId>>,
 }
 
 #[derive(Serialize, Default)]
@@ -60,16 +61,16 @@ struct EcmascriptMergedChunkDeleted {
     // modules in the chunk from the previous version. However, it's useful for
     // merging updates without access to an initial state.
     #[serde(skip_serializing_if = "IndexSet::is_empty")]
-    modules: IndexSet<ModuleIdReadRef>,
+    modules: IndexSet<ReadRef<ModuleId>>,
 }
 
 #[derive(Serialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct EcmascriptMergedChunkPartial {
     #[serde(skip_serializing_if = "IndexSet::is_empty")]
-    added: IndexSet<ModuleIdReadRef>,
+    added: IndexSet<ReadRef<ModuleId>>,
     #[serde(skip_serializing_if = "IndexSet::is_empty")]
-    deleted: IndexSet<ModuleIdReadRef>,
+    deleted: IndexSet<ReadRef<ModuleId>>,
 }
 
 #[derive(Serialize)]
@@ -80,20 +81,33 @@ struct EcmascriptModuleEntry {
 }
 
 impl EcmascriptModuleEntry {
-    fn new(id: &ModuleId, code: CodeReadRef, chunk_path: &str) -> Self {
+    async fn from_code(id: &ModuleId, code: Vc<Code>, chunk_path: &str) -> Result<Self> {
+        let map = match &*code.generate_source_map().await? {
+            Some(map) => {
+                let map = map.await?.to_source_map().await?;
+                let mut map_str = vec![];
+                (*map).to_writer(&mut map_str)?;
+                Some(String::from_utf8(map_str)?)
+            }
+            None => None,
+        };
+
+        Ok(Self::new(id, code.await?, map, chunk_path))
+    }
+
+    fn new(id: &ModuleId, code: ReadRef<Code>, map: Option<String>, chunk_path: &str) -> Self {
         /// serde_qs can't serialize a lone enum when it's [serde::untagged].
         #[derive(Serialize)]
         struct Id<'a> {
             id: &'a ModuleId,
         }
         let id = serde_qs::to_string(&Id { id }).unwrap();
+
         EcmascriptModuleEntry {
             // Cloning a rope is cheap.
             code: code.source_code().clone(),
-            url: format!("/{}?{}", chunk_path, &id),
-            map: code
-                .has_source_map()
-                .then(|| format!("/__turbopack_sourcemap__/{}.map?{}", chunk_path, &id)),
+            url: format!("{}?{}", chunk_path, &id),
+            map,
         }
     }
 }
@@ -102,18 +116,18 @@ impl EcmascriptModuleEntry {
 /// versions, without having to actually merge the versions into a single
 /// hashmap, which would be expensive.
 struct MergedModuleMap {
-    versions: Vec<EcmascriptDevChunkVersionReadRef>,
+    versions: Vec<ReadRef<EcmascriptDevChunkVersion>>,
 }
 
 impl MergedModuleMap {
     /// Creates a new `MergedModuleMap` from the given versions.
-    fn new(versions: Vec<EcmascriptDevChunkVersionReadRef>) -> Self {
+    fn new(versions: Vec<ReadRef<EcmascriptDevChunkVersion>>) -> Self {
         Self { versions }
     }
 
     /// Returns the hash of the module with the given id, or `None` if the
     /// module is not present in any of the versions.
-    fn get(&self, id: &ModuleId) -> Option<u64> {
+    fn get(&self, id: &ReadRef<ModuleId>) -> Option<u64> {
         for version in &self.versions {
             if let Some(hash) = version.entries_hashes.get(id) {
                 return Some(*hash);
@@ -124,26 +138,30 @@ impl MergedModuleMap {
 }
 
 pub(super) async fn update_ecmascript_merged_chunk(
-    content: EcmascriptDevMergedChunkContentVc,
-    from_version: VersionVc,
+    content: Vc<EcmascriptDevMergedChunkContent>,
+    from_version: Vc<Box<dyn Version>>,
 ) -> Result<Update> {
     let to_merged_version = content.version();
-    let from_merged_version =
-        if let Some(from) = EcmascriptDevMergedChunkVersionVc::resolve_from(from_version).await? {
-            from
-        } else {
-            // It's likely `from_version` is `NotFoundVersion`.
-            return Ok(Update::Total(TotalUpdate {
-                to: to_merged_version.as_version().into_trait_ref().await?,
-            }));
-        };
+    let from_merged_version = if let Some(from) =
+        Vc::try_resolve_downcast_type::<EcmascriptDevMergedChunkVersion>(from_version).await?
+    {
+        from
+    } else {
+        // It's likely `from_version` is `NotFoundVersion`.
+        return Ok(Update::Total(TotalUpdate {
+            to: Vc::upcast::<Box<dyn Version>>(to_merged_version)
+                .into_trait_ref()
+                .await?,
+        }));
+    };
 
     let to = to_merged_version.await?;
     let from = from_merged_version.await?;
 
     // When to and from point to the same value we can skip comparing them.
-    // This will happen since `TraitRef<VersionVc>::cell` will not clone the value,
-    // but only make the cell point to the same immutable value (Arc).
+    // This will happen since `TraitRef<Vc<Box<dyn Version>>>::cell` will not clone
+    // the value, but only make the cell point to the same immutable value
+    // (Arc).
     if from.ptr_eq(&to) {
         return Ok(Update::None);
     }
@@ -172,8 +190,7 @@ pub(super) async fn update_ecmascript_merged_chunk(
     let mut merged_update = EcmascriptMergedUpdate::default();
 
     for (content, content_ref, output_root, path) in &to_contents {
-        let Some(chunk_path) = output_root
-            .get_path_to(path) else {
+        let Some(chunk_path) = output_root.get_path_to(path) else {
             continue;
         };
 
@@ -196,11 +213,12 @@ pub(super) async fn update_ecmascript_merged_chunk(
                         partial.added.insert(module_id.clone());
 
                         if merged_module_map.get(&module_id) != Some(module_hash) {
-                            let entry = EcmascriptModuleEntry::new(
+                            let entry = EcmascriptModuleEntry::from_code(
                                 &module_id,
-                                module_code.clone(),
+                                module_code,
                                 chunk_path,
-                            );
+                            )
+                            .await?;
                             merged_update.entries.insert(module_id, entry);
                         }
                     }
@@ -208,7 +226,9 @@ pub(super) async fn update_ecmascript_merged_chunk(
                     partial.deleted.extend(chunk_partial.deleted.into_keys());
 
                     for (module_id, module_code) in chunk_partial.modified {
-                        let entry = EcmascriptModuleEntry::new(&module_id, module_code, chunk_path);
+                        let entry =
+                            EcmascriptModuleEntry::from_code(&module_id, module_code, chunk_path)
+                                .await?;
                         merged_update.entries.insert(module_id, entry);
                     }
 
@@ -221,11 +241,11 @@ pub(super) async fn update_ecmascript_merged_chunk(
 
             for (id, entry) in &content_ref.entries.await? {
                 let hash = *entry.hash.await?;
-                let code = entry.code.await?;
                 added.modules.insert(id.clone());
 
                 if merged_module_map.get(id) != Some(hash) {
-                    let entry = EcmascriptModuleEntry::new(id, code, chunk_path);
+                    let entry =
+                        EcmascriptModuleEntry::from_code(id, entry.code, chunk_path).await?;
                     merged_update.entries.insert(id.clone(), entry);
                 }
             }
@@ -251,7 +271,9 @@ pub(super) async fn update_ecmascript_merged_chunk(
         Update::None
     } else {
         Update::Partial(PartialUpdate {
-            to: to_merged_version.as_version().into_trait_ref().await?,
+            to: Vc::upcast::<Box<dyn Version>>(to_merged_version)
+                .into_trait_ref()
+                .await?,
             instruction: Arc::new(serde_json::to_value(&merged_update)?),
         })
     };

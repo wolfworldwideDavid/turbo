@@ -1,29 +1,40 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
-use turbo_tasks::trace::TraceRawVcs;
-use turbopack_core::{environment::EnvironmentVc, resolve::options::ImportMappingVc};
-use turbopack_ecmascript::{EcmascriptInputTransform, TransformPluginVc};
-use turbopack_ecmascript_plugins::transform::emotion::EmotionTransformConfigVc;
+use turbo_tasks::{trace::TraceRawVcs, ValueDefault, Vc};
+use turbopack_core::{environment::Environment, resolve::options::ImportMapping};
+use turbopack_ecmascript::{references::esm::UrlRewriteBehavior, TreeShakingMode};
 use turbopack_node::{
-    execution_context::ExecutionContextVc, transforms::webpack::WebpackLoaderConfigItemsVc,
+    execution_context::ExecutionContext,
+    transforms::{postcss::PostCssTransformOptions, webpack::WebpackLoaderItems},
 };
 
 use super::ModuleRule;
 use crate::condition::ContextCondition;
 
-#[derive(Default, Clone, PartialEq, Eq, Debug, TraceRawVcs, Serialize, Deserialize)]
-pub struct PostCssTransformOptions {
-    pub postcss_package: Option<ImportMappingVc>,
-    pub placeholder_for_future_extensions: (),
+#[derive(Clone, PartialEq, Eq, Debug, TraceRawVcs, Serialize, Deserialize)]
+pub struct LoaderRuleItem {
+    pub loaders: Vc<WebpackLoaderItems>,
+    pub rename_as: Option<String>,
 }
 
+#[derive(Default)]
+#[turbo_tasks::value(transparent)]
+pub struct WebpackRules(IndexMap<String, LoaderRuleItem>);
+
+#[derive(Default)]
+#[turbo_tasks::value(transparent)]
+pub struct OptionWebpackRules(Option<Vc<WebpackRules>>);
+
 #[turbo_tasks::value(shared)]
-#[derive(Default, Clone, Debug)]
+#[derive(Clone, Debug)]
 pub struct WebpackLoadersOptions {
-    pub extension_to_loaders: IndexMap<String, WebpackLoaderConfigItemsVc>,
-    pub loader_runner_package: Option<ImportMappingVc>,
-    pub placeholder_for_future_extensions: (),
+    pub rules: Vc<WebpackRules>,
+    pub loader_runner_package: Option<Vc<ImportMapping>>,
 }
+
+#[derive(Default)]
+#[turbo_tasks::value(transparent)]
+pub struct OptionWebpackLoadersOptions(Option<Vc<WebpackLoadersOptions>>);
 
 /// The kind of decorators transform to use.
 /// [TODO]: might need bikeshed for the name (Ecma)
@@ -55,16 +66,10 @@ pub struct DecoratorsOptions {
 }
 
 #[turbo_tasks::value_impl]
-impl DecoratorsOptionsVc {
+impl ValueDefault for DecoratorsOptions {
     #[turbo_tasks::function]
-    pub fn default() -> Self {
-        Self::cell(Default::default())
-    }
-}
-
-impl Default for DecoratorsOptionsVc {
-    fn default() -> Self {
-        Self::default()
+    fn value_default() -> Vc<Self> {
+        Self::default().cell()
     }
 }
 
@@ -77,30 +82,10 @@ pub struct TypescriptTransformOptions {
 }
 
 #[turbo_tasks::value_impl]
-impl TypescriptTransformOptionsVc {
+impl ValueDefault for TypescriptTransformOptions {
     #[turbo_tasks::function]
-    pub fn default() -> Self {
-        Self::cell(Default::default())
-    }
-}
-
-impl Default for TypescriptTransformOptionsVc {
-    fn default() -> Self {
-        Self::default()
-    }
-}
-
-impl WebpackLoadersOptions {
-    pub fn is_empty(&self) -> bool {
-        self.extension_to_loaders.is_empty()
-    }
-
-    pub fn clone_if(&self) -> Option<WebpackLoadersOptions> {
-        if self.is_empty() {
-            None
-        } else {
-            Some(self.clone())
-        }
+    fn value_default() -> Vc<Self> {
+        Self::default().cell()
     }
 }
 
@@ -108,130 +93,73 @@ impl WebpackLoadersOptions {
 #[turbo_tasks::value(shared)]
 #[derive(Default, Clone, Debug)]
 pub struct JsxTransformOptions {
+    pub development: bool,
+    pub react_refresh: bool,
     pub import_source: Option<String>,
     pub runtime: Option<String>,
 }
 
-#[turbo_tasks::value(transparent)]
-pub struct OptionStyledComponentsTransformConfig(Option<StyledComponentsTransformConfigVc>);
-
 #[turbo_tasks::value(shared)]
-#[derive(Clone, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct StyledComponentsTransformConfig {
-    pub display_name: bool,
-    pub ssr: bool,
-    pub file_name: bool,
-    pub top_level_import_paths: Vec<String>,
-    pub meaningless_file_names: Vec<String>,
-    pub css_prop: bool,
-    pub namespace: Option<String>,
-}
-
-impl Default for StyledComponentsTransformConfig {
-    fn default() -> Self {
-        StyledComponentsTransformConfig {
-            display_name: true,
-            ssr: true,
-            file_name: true,
-            top_level_import_paths: vec![],
-            meaningless_file_names: vec!["index".to_string()],
-            css_prop: true,
-            namespace: None,
-        }
-    }
+#[derive(Default, Clone)]
+#[serde(default)]
+pub struct MdxTransformModuleOptions {
+    /// The path to a module providing Components to mdx modules.
+    /// The provider must export a useMDXComponents, which is called to access
+    /// an object of components.
+    pub provider_import_source: Option<String>,
 }
 
 #[turbo_tasks::value_impl]
-impl StyledComponentsTransformConfigVc {
+impl MdxTransformModuleOptions {
     #[turbo_tasks::function]
-    pub fn default() -> Self {
+    pub fn default() -> Vc<Self> {
         Self::cell(Default::default())
     }
 }
 
-impl Default for StyledComponentsTransformConfigVc {
-    fn default() -> Self {
-        Self::default()
-    }
-}
-
-/// Configuration options for the custom ecma transform to be applied.
 #[turbo_tasks::value(shared)]
 #[derive(Default, Clone)]
-pub struct CustomEcmascriptTransformPlugins {
-    /// List of plugins to be applied before the main transform.
-    /// Transform will be applied in the order of the list.
-    pub source_transforms: Vec<TransformPluginVc>,
-    /// List of plugins to be applied after the main transform.
-    /// Transform will be applied in the order of the list.
-    pub output_transforms: Vec<TransformPluginVc>,
-}
-
-#[turbo_tasks::value(shared)]
-#[derive(Default, Clone)]
+#[serde(default)]
 pub struct ModuleOptionsContext {
-    #[serde(default)]
-    pub enable_jsx: Option<JsxTransformOptionsVc>,
-    #[serde(default)]
-    pub enable_emotion: Option<EmotionTransformConfigVc>,
-    #[serde(default)]
-    pub enable_react_refresh: bool,
-    #[serde(default)]
-    pub enable_styled_components: Option<StyledComponentsTransformConfigVc>,
-    #[serde(default)]
-    pub enable_styled_jsx: bool,
-    #[serde(default)]
-    pub enable_postcss_transform: Option<PostCssTransformOptions>,
-    #[serde(default)]
-    pub enable_webpack_loaders: Option<WebpackLoadersOptions>,
-    #[serde(default)]
+    pub enable_jsx: Option<Vc<JsxTransformOptions>>,
+    pub enable_postcss_transform: Option<Vc<PostCssTransformOptions>>,
+    pub enable_webpack_loaders: Option<Vc<WebpackLoadersOptions>>,
+    /// Follow type references and resolve declaration files in additional to
+    /// normal resolution.
     pub enable_types: bool,
-    #[serde(default)]
-    pub enable_typescript_transform: Option<TypescriptTransformOptionsVc>,
-    #[serde(default)]
-    pub decorators: Option<DecoratorsOptionsVc>,
-    #[serde(default)]
+    pub enable_typescript_transform: Option<Vc<TypescriptTransformOptions>>,
+    pub decorators: Option<Vc<DecoratorsOptions>>,
     pub enable_mdx: bool,
+    /// This skips `GlobalCss` and `ModuleCss` module assets from being
+    /// generated in the module graph, generating only `Css` module assets.
+    ///
+    /// This is useful for node-file-trace, which tries to emit all assets in
+    /// the module graph, but neither asset types can be emitted directly.
+    pub enable_raw_css: bool,
     // [Note]: currently mdx, and mdx_rs have different configuration entrypoint from next.config.js,
     // however we might want to unify them in the future.
-    #[serde(default)]
-    pub enable_mdx_rs: bool,
-    #[serde(default)]
-    pub preset_env_versions: Option<EnvironmentVc>,
-    #[deprecated(note = "use custom_ecma_transform_plugins instead")]
-    #[serde(default)]
-    pub custom_ecmascript_app_transforms: Vec<EcmascriptInputTransform>,
-    #[deprecated(note = "use custom_ecma_transform_plugins instead")]
-    #[serde(default)]
-    pub custom_ecmascript_transforms: Vec<EcmascriptInputTransform>,
-    #[serde(default)]
-    pub custom_ecma_transform_plugins: Option<CustomEcmascriptTransformPluginsVc>,
-    #[serde(default)]
+    pub enable_mdx_rs: Option<Vc<MdxTransformModuleOptions>>,
+    pub preset_env_versions: Option<Vc<Environment>>,
     /// Custom rules to be applied after all default rules.
     pub custom_rules: Vec<ModuleRule>,
-    #[serde(default)]
-    pub execution_context: Option<ExecutionContextVc>,
-    #[serde(default)]
+    pub execution_context: Option<Vc<ExecutionContext>>,
     /// A list of rules to use a different module option context for certain
     /// context paths. The first matching is used.
-    pub rules: Vec<(ContextCondition, ModuleOptionsContextVc)>,
-    #[serde(default)]
+    pub rules: Vec<(ContextCondition, Vc<ModuleOptionsContext>)>,
     pub placeholder_for_future_extensions: (),
-    #[serde(default)]
-    pub enable_tree_shaking: bool,
+    pub tree_shaking_mode: Option<TreeShakingMode>,
+    pub esm_url_rewrite_behavior: Option<UrlRewriteBehavior>,
+    /// References to externals from ESM imports should use `import()` and make
+    /// async modules.
+    pub import_externals: bool,
+
+    pub use_lightningcss: bool,
 }
 
 #[turbo_tasks::value_impl]
-impl ModuleOptionsContextVc {
+impl ValueDefault for ModuleOptionsContext {
     #[turbo_tasks::function]
-    pub fn default() -> Self {
+    fn value_default() -> Vc<Self> {
         Self::cell(Default::default())
-    }
-}
-
-impl Default for ModuleOptionsContextVc {
-    fn default() -> Self {
-        Self::default()
     }
 }

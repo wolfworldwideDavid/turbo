@@ -1,33 +1,43 @@
-import { NextApiRequest, NextApiResponse } from "next";
-import { withSentry } from "@sentry/nextjs";
+import type { NextApiRequest, NextApiResponse } from "next";
+import { wrapApiHandlerWithSentry } from "@sentry/nextjs";
 
 const CAMPAIGN_ID = process.env.TURBOREPO_SFDC_CAMPAIGN_ID;
 const TRAY_URL = process.env.TRAY_URL;
 
 async function handler(req: NextApiRequest, res: NextApiResponse) {
   if (req.method === "POST") {
+    const reqBody = req.body as { email?: string };
+
+    if (!reqBody.email) {
+      throw new Error("No email was provided.");
+    }
+
     const user = {
-      email: req.body.email,
+      email: reqBody.email,
       campaign_id: CAMPAIGN_ID,
     };
 
+    if (!TRAY_URL) {
+      throw new Error("No TRAY_URL was provided.");
+    }
+
     try {
-      const trayRes = await fetch(TRAY_URL, {
+      await fetch(TRAY_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
-        body: JSON.stringify({ user: user }),
+        body: JSON.stringify({ user }),
       });
 
-      return res.status(201).json(user);
+      res.status(201).json(user);
     } catch (error) {
-      return res.status(500).json(error);
+      res.status(500).json(error);
     }
   } else {
-    return res.status(404).send(null);
+    res.status(404).send(null);
   }
 }
 
-export default withSentry(handler);
+export default wrapApiHandlerWithSentry(handler, "/api/signup");

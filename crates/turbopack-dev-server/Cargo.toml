@@ -9,9 +9,16 @@ autobenches = false
 [lib]
 bench = false
 
+[features]
+log_request_stats = []
+
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 async-compression = { workspace = true }
+auto-hash-map = { workspace = true }
 futures = { workspace = true }
 hyper = { version = "0.14", features = ["full"] }
 hyper-tungstenite = "0.9.0"
@@ -28,6 +35,7 @@ socket2 = "0.4.9"
 tokio = { workspace = true }
 tokio-stream = "0.1.9"
 tokio-util = { workspace = true }
+tracing = { workspace = true }
 urlencoding = "2.1.2"
 
 turbo-tasks = { workspace = true }
@@ -36,11 +44,9 @@ turbo-tasks-fs = { workspace = true }
 turbo-tasks-hash = { workspace = true }
 turbopack-core = { workspace = true }
 turbopack-ecmascript = { workspace = true }
+turbopack-ecmascript-hmr-protocol = { workspace = true }
 # TODO remove this dependency
 turbopack-cli-utils = { workspace = true }
 
 [build-dependencies]
 turbo-tasks-build = { workspace = true }
-
-[features]
-log_request_stats = []

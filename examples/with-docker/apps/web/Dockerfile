@@ -11,7 +11,7 @@ RUN apk update
 WORKDIR /app
 RUN yarn global add turbo
 COPY . .
-RUN turbo prune --scope=web --docker
+RUN turbo prune web --docker
 
 # Add lockfile and package.json's of isolated subworkspace
 FROM base AS installer
@@ -36,7 +36,7 @@ COPY turbo.json turbo.json
 # ARG TURBO_TOKEN
 # ENV TURBO_TOKEN=$TURBO_TOKEN
 
-RUN yarn turbo run build --filter=web...
+RUN yarn turbo build --filter=web...
 
 FROM base AS runner
 WORKDIR /app

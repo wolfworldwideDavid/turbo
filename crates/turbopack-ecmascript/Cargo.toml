@@ -9,9 +9,13 @@ autobenches = false
 [lib]
 bench = false
 
+[lints]
+workspace = true
+
 [dependencies]
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+futures = { workspace = true }
 indexmap = { workspace = true }
 indoc = { workspace = true }
 lazy_static = { workspace = true }
@@ -19,16 +23,14 @@ num-bigint = "0.4"
 num-traits = "0.2.15"
 once_cell = { workspace = true }
 parking_lot = { workspace = true }
-petgraph = "0.6.2"
+petgraph = { workspace = true }
 pin-project-lite = { workspace = true }
 regex = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_qs = { workspace = true }
-styled_components = { workspace = true }
-styled_jsx = { workspace = true }
-swc_emotion = { workspace = true }
+sourcemap = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 turbo-tasks = { workspace = true }

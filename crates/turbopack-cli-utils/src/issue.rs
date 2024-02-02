@@ -11,13 +11,11 @@ use std::{
 use anyhow::{anyhow, Result};
 use crossterm::style::{StyledContent, Stylize};
 use owo_colors::{OwoColorize as _, Style};
-use turbo_tasks::{
-    primitives::BoolVc, RawVc, ReadRef, TransientInstance, TransientValue, TryJoinIterExt,
-};
+use turbo_tasks::{RawVc, ReadRef, TransientInstance, TransientValue, TryJoinIterExt, Vc};
 use turbo_tasks_fs::{source_context::get_source_context, FileLinesContent};
 use turbopack_core::issue::{
-    CapturedIssues, IssueReporter, IssueReporterVc, IssueSeverity, PlainIssue,
-    PlainIssueProcessingPathItem, PlainIssueProcessingPathItemReadRef, PlainIssueSource,
+    CapturedIssues, Issue, IssueReporter, IssueSeverity, PlainIssue, PlainIssueProcessingPathItem,
+    PlainIssueSource, StyledString,
 };
 
 use crate::source_context::format_source_context_lines;
@@ -80,26 +78,24 @@ fn severity_to_style(severity: IssueSeverity) -> Style {
 }
 
 fn format_source_content(source: &PlainIssueSource, formatted_issue: &mut String) {
-    if let FileLinesContent::Lines(lines) = source.asset.content.lines() {
-        let start_line = source.start.line;
-        let end_line = source.end.line;
-        let start_column = source.start.column;
-        let end_column = source.end.column;
-        let lines = lines.iter().map(|l| l.content.as_str());
-        let ctx = get_source_context(lines, start_line, start_column, end_line, end_column);
-        format_source_context_lines(&ctx, formatted_issue);
+    if let FileLinesContent::Lines(lines) = source.asset.content.lines_ref() {
+        if let Some((start, end)) = source.range {
+            let lines = lines.iter().map(|l| l.content.as_str());
+            let ctx = get_source_context(lines, start.line, start.column, end.line, end.column);
+            format_source_context_lines(&ctx, formatted_issue);
+        }
     }
 }
 
 fn format_optional_path(
-    path: &Option<Vec<PlainIssueProcessingPathItemReadRef>>,
+    path: &Option<Vec<ReadRef<PlainIssueProcessingPathItem>>>,
     formatted_issue: &mut String,
 ) -> Result<()> {
     if let Some(path) = path {
         let mut last_context = None;
         for item in path.iter().rev() {
             let PlainIssueProcessingPathItem {
-                ref context,
+                file_path: ref context,
                 ref description,
             } = **item;
             if let Some(context) = context {
@@ -140,38 +136,28 @@ pub fn format_issue(
     let severity = plain_issue.severity;
     // TODO CLICKABLE PATHS
     let context_path = plain_issue
-        .context
+        .file_path
         .replace("[project]", &current_dir.to_string_lossy())
         .replace("/./", "/")
         .replace("\\\\?\\", "");
     let category = &plain_issue.category;
-    let title = &plain_issue.title;
 
-    let mut styled_issue = if let Some(source) = &plain_issue.source {
-        let mut styled_issue = format!(
-            "{}:{}:{}  {}",
-            context_path,
-            source.start.line + 1,
-            source.start.column,
-            title.bold()
-        );
-        styled_issue.push('\n');
-        format_source_content(source, &mut styled_issue);
-        styled_issue
-    } else {
-        format!("{}", title.bold())
-    };
-
+    let mut styled_issue = style_issue_source(plain_issue, &context_path);
     let description = &plain_issue.description;
-    if !description.is_empty() {
-        writeln!(styled_issue, "\n{description}").unwrap();
+    if let Some(description) = description {
+        writeln!(
+            styled_issue,
+            "\n{}",
+            render_styled_string_to_ansi(description)
+        )
+        .unwrap();
     }
 
     if log_detail {
         styled_issue.push('\n');
         let detail = &plain_issue.detail;
-        if !detail.is_empty() {
-            for line in detail.split('\n') {
+        if let Some(detail) = detail {
+            for line in render_styled_string_to_ansi(detail).split('\n') {
                 writeln!(styled_issue, "| {line}").unwrap();
             }
         }
@@ -189,7 +175,7 @@ pub fn format_issue(
         "{} - [{}] {}",
         severity.style(severity_to_style(severity)),
         category,
-        plain_issue.context
+        plain_issue.file_path
     )
     .unwrap();
 
@@ -335,9 +321,9 @@ impl PartialEq for ConsoleUi {
 }
 
 #[turbo_tasks::value_impl]
-impl ConsoleUiVc {
+impl ConsoleUi {
     #[turbo_tasks::function]
-    pub fn new(options: TransientInstance<LogOptions>) -> Self {
+    pub fn new(options: TransientInstance<LogOptions>) -> Vc<Self> {
         ConsoleUi {
             options: (*options).clone(),
             seen: Arc::new(Mutex::new(SeenIssues::new())),
@@ -351,9 +337,10 @@ impl IssueReporter for ConsoleUi {
     #[turbo_tasks::function]
     async fn report_issues(
         &self,
-        issues: TransientInstance<ReadRef<CapturedIssues>>,
+        issues: TransientInstance<CapturedIssues>,
         source: TransientValue<RawVc>,
-    ) -> Result<BoolVc> {
+        min_failing_severity: Vc<IssueSeverity>,
+    ) -> Result<Vc<bool>> {
         let issues = &*issues;
         let LogOptions {
             ref current_dir,
@@ -389,49 +376,33 @@ impl IssueReporter for ConsoleUi {
             }
 
             let severity = plain_issue.severity;
-            if severity == IssueSeverity::Fatal {
+            if severity <= *min_failing_severity.await? {
                 has_fatal = true;
             }
 
-            let context_path = make_relative_to_cwd(&plain_issue.context, project_dir, current_dir);
+            let context_path =
+                make_relative_to_cwd(&plain_issue.file_path, project_dir, current_dir);
             let category = &plain_issue.category;
-            let title = &plain_issue.title;
             let processing_path = &*plain_issue.processing_path;
-            let severity_map = grouped_issues
-                .entry(severity)
-                .or_insert_with(Default::default);
-            let category_map = severity_map
-                .entry(category.clone())
-                .or_insert_with(Default::default);
-            let issues = category_map
-                .entry(context_path.to_string())
-                .or_insert_with(Default::default);
+            let severity_map = grouped_issues.entry(severity).or_default();
+            let category_map = severity_map.entry(category.clone()).or_default();
+            let issues = category_map.entry(context_path.to_string()).or_default();
 
-            let mut styled_issue = if let Some(source) = &plain_issue.source {
-                let mut styled_issue = format!(
-                    "{}:{}:{}  {}",
-                    context_path,
-                    source.start.line + 1,
-                    source.start.column,
-                    title.bold()
-                );
-                styled_issue.push('\n');
-                format_source_content(source, &mut styled_issue);
-                styled_issue
-            } else {
-                format!("{}", title.bold())
-            };
-
+            let mut styled_issue = style_issue_source(&plain_issue, &context_path);
             let description = &plain_issue.description;
-            if !description.is_empty() {
-                writeln!(&mut styled_issue, "\n{description}")?;
+            if let Some(description) = description {
+                writeln!(
+                    &mut styled_issue,
+                    "\n{}",
+                    render_styled_string_to_ansi(description)
+                )?;
             }
 
             if log_detail {
                 styled_issue.push('\n');
                 let detail = &plain_issue.detail;
-                if !detail.is_empty() {
-                    for line in detail.split('\n') {
+                if let Some(detail) = detail {
+                    for line in render_styled_string_to_ansi(detail).split('\n') {
                         writeln!(&mut styled_issue, "| {line}")?;
                     }
                 }
@@ -529,7 +500,7 @@ impl IssueReporter for ConsoleUi {
             }
         }
 
-        Ok(BoolVc::cell(has_fatal))
+        Ok(Vc::cell(has_fatal))
     }
 }
 
@@ -574,5 +545,55 @@ fn show_all_message_with_shown_count(
             "--show-all".bright_green()
         )
         .bold()
+    }
+}
+
+fn render_styled_string_to_ansi(styled_string: &StyledString) -> String {
+    match styled_string {
+        StyledString::Line(parts) => {
+            let mut string = String::new();
+            for part in parts {
+                string.push_str(&render_styled_string_to_ansi(part));
+            }
+            string.push('\n');
+            string
+        }
+        StyledString::Stack(parts) => {
+            let mut string = String::new();
+            for part in parts {
+                string.push_str(&render_styled_string_to_ansi(part));
+                string.push('\n');
+            }
+            string
+        }
+        StyledString::Text(string) => string.to_string(),
+        StyledString::Code(string) => string.blue().to_string(),
+        StyledString::Strong(string) => string.bold().to_string(),
+    }
+}
+
+fn style_issue_source(plain_issue: &PlainIssue, context_path: &str) -> String {
+    let title = &plain_issue.title;
+    let formatted_title = match title {
+        StyledString::Text(text) => text.bold().to_string(),
+        _ => render_styled_string_to_ansi(title),
+    };
+
+    if let Some(source) = &plain_issue.source {
+        let mut styled_issue = match source.range {
+            Some((start, _)) => format!(
+                "{}:{}:{}  {}",
+                context_path,
+                start.line + 1,
+                start.column,
+                formatted_title
+            ),
+            None => format!("{}  {}", context_path, formatted_title),
+        };
+        styled_issue.push('\n');
+        format_source_content(source, &mut styled_issue);
+        styled_issue
+    } else {
+        formatted_title
     }
 }

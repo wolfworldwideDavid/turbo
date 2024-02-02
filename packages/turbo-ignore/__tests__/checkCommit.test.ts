@@ -1,6 +1,6 @@
-import child_process from "child_process";
-import { checkCommit } from "../src/checkCommit";
+import child_process from "node:child_process";
 import { mockEnv } from "@turbo/test-utils";
+import { checkCommit } from "../src/checkCommit";
 
 describe("checkCommit()", () => {
   describe("on Vercel", () => {
@@ -93,6 +93,28 @@ describe("checkCommit()", () => {
           result: "skip",
           scope: "workspace",
           reason: "Found commit message: [vercel skip test-workspace]",
+        });
+      });
+
+      it("results in deploy when deploy only is found", async () => {
+        process.env.VERCEL = "1";
+        process.env.VERCEL_GIT_COMMIT_MESSAGE =
+          "deploying [vercel only test-workspace]";
+        expect(checkCommit({ workspace: "test-workspace" })).toEqual({
+          result: "deploy",
+          scope: "workspace",
+          reason: "Found commit message: [vercel only test-workspace]",
+        });
+      });
+
+      it("results in skip when deploy not match workspace", async () => {
+        process.env.VERCEL = "1";
+        process.env.VERCEL_GIT_COMMIT_MESSAGE =
+          "deploying [vercel only test-workspace]";
+        expect(checkCommit({ workspace: "test-workspace2" })).toEqual({
+          result: "skip",
+          scope: "workspace",
+          reason: "Found commit message: [vercel only test-workspace]",
         });
       });
     });
@@ -220,6 +242,36 @@ describe("checkCommit()", () => {
           result: "skip",
           scope: "workspace",
           reason: "Found commit message: [vercel skip test-workspace]",
+        });
+        expect(mockExecSync).toHaveBeenCalledWith("git show -s --format=%B");
+        mockExecSync.mockRestore();
+      });
+
+      it("results in deploy when deploy only is found", async () => {
+        const commitBody = "deploying [vercel only test-workspace]";
+        const mockExecSync = jest
+          .spyOn(child_process, "execSync")
+          .mockImplementation((_) => commitBody);
+
+        expect(checkCommit({ workspace: "test-workspace" })).toEqual({
+          result: "deploy",
+          scope: "workspace",
+          reason: "Found commit message: [vercel only test-workspace]",
+        });
+        expect(mockExecSync).toHaveBeenCalledWith("git show -s --format=%B");
+        mockExecSync.mockRestore();
+      });
+
+      it("results in skip when deploy not match workspace", async () => {
+        const commitBody = "deploying [vercel only test-workspace]";
+        const mockExecSync = jest
+          .spyOn(child_process, "execSync")
+          .mockImplementation((_) => commitBody);
+
+        expect(checkCommit({ workspace: "test-workspace2" })).toEqual({
+          result: "skip",
+          scope: "workspace",
+          reason: "Found commit message: [vercel only test-workspace]",
         });
         expect(mockExecSync).toHaveBeenCalledWith("git show -s --format=%B");
         mockExecSync.mockRestore();

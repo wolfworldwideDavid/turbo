@@ -179,6 +179,7 @@ pub struct DepGraph {
 
 #[derive(Debug, Clone, Copy)]
 pub(super) enum Mode {
+    #[allow(dead_code)]
     Development,
     Production,
 }
@@ -298,7 +299,8 @@ impl DepGraph {
                         specifiers,
                         src: Box::new(uri_of_module.clone().into()),
                         type_only: false,
-                        asserts: Some(Box::new(create_turbopack_chunk_id_assert(dep))),
+                        with: Some(Box::new(create_turbopack_chunk_id_assert(dep))),
+                        phase: Default::default(),
                     })));
             }
 
@@ -333,7 +335,7 @@ impl DepGraph {
                                     )],
                                     src: None,
                                     type_only: false,
-                                    asserts: Some(Box::new(ObjectLit {
+                                    with: Some(Box::new(ObjectLit {
                                         span: DUMMY_SP,
                                         props: vec![assertion_prop],
                                     })),
@@ -786,7 +788,7 @@ impl DepGraph {
                         })],
                         src: None,
                         type_only: false,
-                        asserts: None,
+                        with: None,
                     })),
                     export: Some(export.clone()),
                     ..Default::default()

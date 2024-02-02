@@ -3,7 +3,7 @@ title: Turborepo 1.8
 date: 2023/02/22
 description: Turborepo 1.8 brings better flexibility and more control to your codebase by improving turbo's understanding of your workspaces.
 tag: "web development"
-ogImage: /images/blog/turbo-1-8-0/twitter-card.png
+ogImage: /images/blog/turbo-1-8-0/x-card.png
 ---
 
 import { Tabs, Tab } from '../../components/Tabs'
@@ -11,8 +11,8 @@ import { Tabs, Tab } from '../../components/Tabs'
 # Turborepo 1.8
 
 import { Authors } from '../../components/Authors'
-import Badge from '../../components/Badge'
-import Date from "../../components/blog/Date";
+import { Badge } from '../../components/Badge'
+import { Date } from "../../components/blog/Date";
 
 <Date>
   Wednesday, February 22th, 2023
@@ -96,7 +96,7 @@ In the example above, `outputs` is customized for both apps, while `dependsOn` i
 
 In [Turborepo v1.7](/blog/turbo-1-7-0), `turbo` became globally installable, giving you the power to run your tasks from anywhere in your codebase. However, `turbo` would still run tasks from the root, running tasks in other workspaces that you may not have intended to run.
 
-With 1.8, `turbo` will automatically detect the workspace you are in and generate [the `--filter` syntax](/repo/docs/reference/command-line-reference#--filter) to scope your task to that workspace.
+With 1.8, `turbo` will automatically detect the workspace you are in and generate [the `--filter` syntax](/repo/docs/reference/command-line-reference/run#--filter) to scope your task to that workspace.
 
 As an example, if your current directory is `apps/admin` and you use the `turbo build` command, `turbo` will run `turbo build --filter=admin` under the hood, focusing on the workspace that you are working on.
 

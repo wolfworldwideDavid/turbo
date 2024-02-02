@@ -1,8 +1,9 @@
+use anyhow::Result;
 use async_recursion::async_recursion;
 use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use turbo_tasks::trace::TraceRawVcs;
-use turbo_tasks_fs::{FileSystemPath, FileSystemPathVc};
+use turbo_tasks::{trace::TraceRawVcs, Vc};
+use turbo_tasks_fs::FileSystemPath;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TraceRawVcs, PartialEq, Eq)]
 pub enum ContextCondition {
@@ -10,7 +11,7 @@ pub enum ContextCondition {
     Any(Vec<ContextCondition>),
     Not(Box<ContextCondition>),
     InDirectory(String),
-    InPath(FileSystemPathVc),
+    InPath(Vc<FileSystemPath>),
 }
 
 impl ContextCondition {
@@ -32,32 +33,34 @@ impl ContextCondition {
 
     #[async_recursion]
     /// Returns true if the condition matches the context.
-    pub async fn matches(&self, context: &FileSystemPath) -> bool {
+    pub async fn matches(&self, path: &FileSystemPath) -> Result<bool> {
         match self {
             ContextCondition::All(conditions) => {
+                // False positive.
+                #[allow(clippy::manual_try_fold)]
                 stream::iter(conditions)
-                    .all(|c| async move { c.matches(context).await })
+                    .fold(Ok(true), |acc, c| async move {
+                        Ok(acc? && c.matches(path).await?)
+                    })
                     .await
             }
             ContextCondition::Any(conditions) => {
+                // False positive.
+                #[allow(clippy::manual_try_fold)]
                 stream::iter(conditions)
-                    .any(|c| async move { c.matches(context).await })
+                    .fold(Ok(false), |acc, c| async move {
+                        Ok(acc? || c.matches(path).await?)
+                    })
                     .await
             }
-            ContextCondition::Not(condition) => !condition.matches(context).await,
-            ContextCondition::InPath(path) => {
-                if let Ok(path) = path.await {
-                    context.is_inside(&path)
-                } else {
-                    false
-                }
+            ContextCondition::Not(condition) => condition.matches(path).await.map(|b| !b),
+            ContextCondition::InPath(other_path) => {
+                Ok(path.is_inside_or_equal_ref(&*other_path.await?))
             }
-            ContextCondition::InDirectory(dir) => {
-                context.path.starts_with(&format!("{dir}/"))
-                    || context.path.contains(&format!("/{dir}/"))
-                    || context.path.ends_with(&format!("/{dir}"))
-                    || context.path == *dir
-            }
+            ContextCondition::InDirectory(dir) => Ok(path.path.starts_with(&format!("{dir}/"))
+                || path.path.contains(&format!("/{dir}/"))
+                || path.path.ends_with(&format!("/{dir}"))
+                || path.path == *dir),
         }
     }
 }

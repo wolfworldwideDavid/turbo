@@ -3,7 +3,7 @@ title: Turborepo 1.7
 date: 2023/01/11
 description: Turborepo 1.7 focuses on improving developer experience by bringing more clarity to your tasks.
 tag: "web development"
-ogImage: /images/blog/turbo-1-7-0/twitter-card.png
+ogImage: /images/blog/turbo-1-7-0/x-card.png
 ---
 
 import { Tabs, Tab } from '../../components/Tabs'
@@ -11,8 +11,8 @@ import { Tabs, Tab } from '../../components/Tabs'
 # Turborepo 1.7
 
 import { Authors } from '../../components/Authors'
-import Badge from '../../components/Badge'
-import Date from "../../components/blog/Date";
+import { Badge } from '../../components/Badge'
+import { Date } from "../../components/blog/Date";
 
 <Date>
   Wednesday, January 11th, 2023
@@ -131,7 +131,7 @@ Also note that you will no longer need to specify `outputs: []` because not cach
 ## “Errors only” output mode for quieter logs
 
 To bring visibility to errors, community member [@dobesv](https://github.com/dobesv) contributed [a solution to only show errors instead of all logs from a task run](https://github.com/vercel/turbo/pull/2588). While debugging a pipeline, `--output-logs=errors-only` can be used to keep your signal-to-noise ratio high so you can focus on ensuring successful runs for your pipelines.
-This can be used as a [configuration option](/repo/docs/reference/configuration#outputmode) or as a [CLI flag](/repo/docs/reference/command-line-reference#--output-logs)
+This can be used as a [configuration option](/repo/docs/reference/configuration#outputmode) or as a [CLI flag](/repo/docs/reference/command-line-reference/run#--output-logs)
 
 ```bash
 turbo build --output-logs=errors-only

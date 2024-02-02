@@ -1,13 +1,12 @@
-/* eslint-disable react/no-unescaped-entities */
 import Head from "next/head";
 import { Container } from "../Container";
 
-export default function Confirm() {
+export function Confirm() {
   return (
     <>
       <Head>
         <title>Confirm</title>
-        <meta name="robots" content="noindex" />
+        <meta content="noindex" name="robots" />
       </Head>
       <Container>
         <div className="container mx-auto">

@@ -33,7 +33,7 @@ Now imagine this in a real bundler, with thousands of files to read and transfor
 
 ### The cache
 
-The Turbo engine currently stores its cache in memory. This means the cache will last as long as the process running it - which works well for a dev server. When you run `next dev --turbo` in Next v13, you’ll start a cache with the Turbo engine. When you cancel your dev server, the cache gets cleared.
+The Turbo engine currently stores its cache in memory. This means the cache will last as long as the process running it - which works well for a dev server. When you run `next dev --turbo` in Next.js 13+, you’ll start a cache with the Turbo engine. When you cancel your dev server, the cache gets cleared.
 
 In the future, we’re planning to persist this cache - either to the filesystem, or to a remote cache like Turborepo’s. This will mean that Turbopack could remember work done _across runs and machines._
 
@@ -51,7 +51,7 @@ There are two ways to make a process faster - work faster, or do less work. For 
 
 ### Page-level compilation
 
-Versions of Next.js from 2-3 years ago used to compile the _entire application_ before showing your dev server. In Next.js [11], we began compiling _only the code on the page you requested._
+Versions of Next.js from 2-3 years ago used to compile the _entire application_ before showing your dev server. In [Next.js 11](https://nextjs.org/blog/next-11), we began compiling _only the code on the page you requested._
 
 That’s better, but it’s not perfect. When you navigate to `/users`, we’ll bundle all the client and server modules, dynamic-imported modules, and referenced CSS and images. That means if a large part of your page is hidden from view, or hidden behind tabs, we’ll still compile it anyway.
 

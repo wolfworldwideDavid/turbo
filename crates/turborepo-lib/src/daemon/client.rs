@@ -1,50 +1,25 @@
+use std::io;
+
 use thiserror::Error;
 use tonic::{Code, Status};
 use tracing::info;
+use turbopath::AbsoluteSystemPathBuf;
 
-use self::proto::turbod_client::TurbodClient;
 use super::{
     connector::{DaemonConnector, DaemonConnectorError},
     endpoint::SocketOpenError,
+    proto::DiscoverPackagesResponse,
 };
-use crate::get_version;
+use crate::{daemon::proto, globwatcher::HashGlobSetupError};
 
-pub mod proto {
-    tonic::include_proto!("turbodprotocol");
-}
-
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DaemonClient<T> {
-    client: TurbodClient<tonic::transport::Channel>,
+    client: proto::turbod_client::TurbodClient<tonic::transport::Channel>,
     connect_settings: T,
 }
 
-impl<T> DaemonClient<T> {
-    /// Interrogate the server for its version.
-    pub(super) async fn handshake(&mut self) -> Result<(), DaemonError> {
-        let _ret = self
-            .client
-            .hello(proto::HelloRequest {
-                version: get_version().to_string(),
-                // todo(arlyon): add session id
-                ..Default::default()
-            })
-            .await?;
-
-        Ok(())
-    }
-
-    /// Stops the daemon and closes the connection, returning
-    /// the connection settings that were used to connect.
-    pub async fn stop(mut self) -> Result<T, DaemonError> {
-        info!("Stopping daemon");
-        self.client.shutdown(proto::ShutdownRequest {}).await?;
-        Ok(self.connect_settings)
-    }
-}
-
 impl DaemonClient<()> {
-    pub fn new(client: TurbodClient<tonic::transport::Channel>) -> Self {
+    pub fn new(client: proto::turbod_client::TurbodClient<tonic::transport::Channel>) -> Self {
         Self {
             client,
             connect_settings: (),
@@ -64,18 +39,44 @@ impl DaemonClient<()> {
     }
 }
 
-impl DaemonClient<DaemonConnector> {
-    /// Stops the daemon, closes the connection, and opens a new connection.
-    pub async fn restart(self) -> Result<DaemonClient<DaemonConnector>, DaemonError> {
-        self.stop().await?.connect().await.map_err(Into::into)
+impl<T> DaemonClient<T> {
+    /// Interrogate the server for its version.
+    #[tracing::instrument(skip(self))]
+    pub(super) async fn handshake(&mut self) -> Result<(), DaemonError> {
+        let _ret = self
+            .client
+            .hello(proto::HelloRequest {
+                version: proto::VERSION.to_string(),
+                // minor version means that we need the daemon server to have at least the
+                // same features as us, but it can have more. it is unlikely that we will
+                // ever want to change the version range but we can tune it if, for example,
+                // we need to lock to a specific minor version.
+                supported_version_range: proto::VersionRange::Minor.into(),
+                // todo(arlyon): add session id
+                ..Default::default()
+            })
+            .await?;
+
+        Ok(())
     }
 
-    #[allow(dead_code)]
+    /// Stops the daemon and closes the connection, returning
+    /// the connection settings that were used to connect.
+    pub async fn stop(mut self) -> Result<T, DaemonError> {
+        info!("Stopping daemon");
+        self.client.shutdown(proto::ShutdownRequest {}).await?;
+        Ok(self.connect_settings)
+    }
+
     pub async fn get_changed_outputs(
         &mut self,
         hash: String,
         output_globs: Vec<String>,
     ) -> Result<Vec<String>, DaemonError> {
+        let output_globs = output_globs
+            .iter()
+            .map(|raw_glob| format_repo_relative_glob(raw_glob))
+            .collect();
         Ok(self
             .client
             .get_changed_outputs(proto::GetChangedOutputsRequest { hash, output_globs })
@@ -84,18 +85,27 @@ impl DaemonClient<DaemonConnector> {
             .changed_output_globs)
     }
 
-    #[allow(dead_code)]
     pub async fn notify_outputs_written(
         &mut self,
         hash: String,
         output_globs: Vec<String>,
         output_exclusion_globs: Vec<String>,
+        time_saved: u64,
     ) -> Result<(), DaemonError> {
+        let output_globs = output_globs
+            .iter()
+            .map(|raw_glob| format_repo_relative_glob(raw_glob))
+            .collect();
+        let output_exclusion_globs = output_exclusion_globs
+            .iter()
+            .map(|raw_glob| format_repo_relative_glob(raw_glob))
+            .collect();
         self.client
             .notify_outputs_written(proto::NotifyOutputsWrittenRequest {
                 hash,
                 output_globs,
                 output_exclusion_globs,
+                time_saved,
             })
             .await?;
 
@@ -112,6 +122,23 @@ impl DaemonClient<DaemonConnector> {
             .ok_or(DaemonError::MalformedResponse)
     }
 
+    pub async fn discover_packages(&mut self) -> Result<DiscoverPackagesResponse, DaemonError> {
+        let response = self
+            .client
+            .discover_packages(proto::DiscoverPackagesRequest {})
+            .await?
+            .into_inner();
+
+        Ok(response)
+    }
+}
+
+impl DaemonClient<DaemonConnector> {
+    /// Stops the daemon, closes the connection, and opens a new connection.
+    pub async fn restart(self) -> Result<DaemonClient<DaemonConnector>, DaemonError> {
+        self.stop().await?.connect().await.map_err(Into::into)
+    }
+
     pub fn pid_file(&self) -> &turbopath::AbsoluteSystemPathBuf {
         &self.connect_settings.pid_file
     }
@@ -121,16 +148,29 @@ impl DaemonClient<DaemonConnector> {
     }
 }
 
+fn format_repo_relative_glob(glob: &str) -> String {
+    #[cfg(windows)]
+    let glob = {
+        let glob = if let Some(idx) = glob.find(':') {
+            &glob[..idx]
+        } else {
+            glob
+        };
+        glob.replace("\\", "/")
+    };
+    glob.replace(':', "\\:")
+}
+
 #[derive(Error, Debug)]
 pub enum DaemonError {
     /// The server was connected but is now unavailable.
-    #[error("server is unavailable")]
-    Unavailable,
+    #[error("server is unavailable: {0}")]
+    Unavailable(String),
     #[error("error opening socket: {0}")]
     SocketOpen(#[from] SocketOpenError),
     /// The server is running a different version of turborepo.
-    #[error("version mismatch")]
-    VersionMismatch,
+    #[error("version mismatch: {0:?}")]
+    VersionMismatch(Option<String>),
     /// There is an issue with the underlying grpc transport.
     #[error("bad grpc transport: {0}")]
     GrpcTransport(#[from] tonic::transport::Error),
@@ -145,24 +185,56 @@ pub enum DaemonError {
     DaemonConnect(#[from] DaemonConnectorError),
     /// The timeout specified was invalid.
     #[error("invalid timeout specified ({0})")]
+    #[allow(dead_code)]
     InvalidTimeout(String),
     /// The server is unable to start file watching.
     #[error("unable to start file watching")]
-    FileWatching(#[from] globwatch::Error),
+    SetupFileWatching(#[from] HashGlobSetupError),
 
     #[error("unable to display output: {0}")]
     DisplayError(#[from] serde_json::Error),
 
     #[error("unable to construct log file name: {0}")]
     InvalidLogFile(#[from] time::Error),
+
+    #[error("unable to complete daemon clean")]
+    CleanFailed,
+
+    #[error("failed to setup cookie dir {1}: {0}")]
+    CookieDir(io::Error, AbsoluteSystemPathBuf),
+
+    #[error("failed to determine package manager: {0}")]
+    PackageManager(#[from] turborepo_repository::package_manager::Error),
 }
 
 impl From<Status> for DaemonError {
     fn from(status: Status) -> DaemonError {
         match status.code() {
-            Code::FailedPrecondition => DaemonError::VersionMismatch,
-            Code::Unavailable => DaemonError::Unavailable,
+            Code::FailedPrecondition => {
+                DaemonError::VersionMismatch(Some(status.message().to_owned()))
+            }
+            Code::Unimplemented => DaemonError::VersionMismatch(None),
+            Code::Unavailable => DaemonError::Unavailable(status.message().to_string()),
             c => DaemonError::GrpcFailure(c),
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use std::path::MAIN_SEPARATOR_STR;
+
+    use crate::daemon::client::format_repo_relative_glob;
+
+    #[test]
+    fn test_format_repo_relative_glob() {
+        let raw_glob = ["some", ".turbo", "turbo-foo:bar.log"].join(MAIN_SEPARATOR_STR);
+        #[cfg(windows)]
+        let expected = "some/.turbo/turbo-foo";
+        #[cfg(not(windows))]
+        let expected = "some/.turbo/turbo-foo\\:bar.log";
+
+        let result = format_repo_relative_glob(&raw_glob);
+        assert_eq!(result, expected);
     }
 }

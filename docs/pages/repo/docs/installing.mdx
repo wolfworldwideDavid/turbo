@@ -3,7 +3,7 @@ title: Installing Turborepo
 description: Learn how to install Turborepo for use with your repository
 ---
 
-import Callout from "../../../components/Callout";
+import { Callout } from "../../../components/Callout";
 import { Tabs, Tab } from '../../../components/Tabs'
 
 # Install Turborepo
@@ -52,6 +52,8 @@ cd <repository root>
 turbo build --filter=docs
 ```
 
+If you've installed global `turbo` before, make sure you use the same package manager as your existing installation to avoid unexpected behaviors. For more info, [visit the FAQ](/repo/docs/faq#should-i-install-turborepo-globally).
+
 ## Install Per Repository
 
 You may wish to pin the version of Turborepo used within a repository, especially [if you are
@@ -61,7 +63,7 @@ of the repository:
 <Tabs items={['npm', 'yarn', 'pnpm']} storageKey="selected-pkg-manager">
   <Tab>
     ```bash
-    npm install turbo --dev
+    npm install turbo --save-dev
     ```
   </Tab>
   <Tab>

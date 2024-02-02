@@ -1,4 +1,5 @@
 use std::{
+    ffi::OsStr,
     process::Stdio,
     sync::Arc,
     time::{Duration, Instant},
@@ -6,13 +7,14 @@ use std::{
 
 use command_group::AsyncCommandGroup;
 use notify::{Config, Event, EventKind, Watcher};
+use pidlock::PidFileError;
 use sysinfo::{Pid, ProcessExt, ProcessRefreshKind, RefreshKind, SystemExt};
 use thiserror::Error;
 use tokio::{sync::mpsc, time::timeout};
 use tonic::transport::Endpoint;
 use tracing::debug;
 
-use super::{client::proto::turbod_client::TurbodClient, DaemonClient};
+use super::{proto::turbod_client::TurbodClient, DaemonClient};
 use crate::daemon::DaemonError;
 
 #[derive(Error, Debug)]
@@ -33,7 +35,7 @@ pub enum DaemonConnectorError {
     #[error("unable to make handshake: {0}")]
     Handshake(#[from] Box<DaemonError>),
     /// Waiting for the socket timed out.
-    #[error("timeout while watchin directory: {0}")]
+    #[error("timeout while watching directory: {0}")]
     Timeout(#[from] tokio::time::error::Elapsed),
     /// There was an issue in the file watcher.
     #[error("unable to watch directory: {0}")]
@@ -41,6 +43,9 @@ pub enum DaemonConnectorError {
 
     #[error("unable to connect to daemon after {0} retries")]
     ConnectRetriesExceeded(usize),
+
+    #[error("unable to use pid file: {0}")]
+    PidFile(#[from] PidFileError),
 }
 
 #[derive(Error, Debug)]
@@ -51,7 +56,7 @@ pub enum ForkError {
     Spawn(#[from] std::io::Error),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DaemonConnector {
     /// Whether the connector is allowed to start a daemon if it is not already
     /// running.
@@ -65,6 +70,7 @@ pub struct DaemonConnector {
 
 impl DaemonConnector {
     const CONNECT_RETRY_MAX: usize = 3;
+    const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
     const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
     const SOCKET_TIMEOUT: Duration = Duration::from_secs(1);
     const SOCKET_ERROR_WAIT: Duration = Duration::from_millis(50);
@@ -80,6 +86,7 @@ impl DaemonConnector {
     /// 1. the versions do not match
     /// 2. the server is not running
     /// 3. the server is unresponsive
+    #[tracing::instrument(skip(self))]
     pub async fn connect(self) -> Result<DaemonClient<DaemonConnector>, DaemonConnectorError> {
         let time = Instant::now();
         for _ in 0..Self::CONNECT_RETRY_MAX {
@@ -106,10 +113,10 @@ impl DaemonConnector {
                         Ok(client.with_connect_settings(self))
                     }
                 }
-                Err(DaemonError::VersionMismatch) if self.can_kill_server => {
+                Err(DaemonError::VersionMismatch(_)) if self.can_kill_server => {
                     self.kill_live_server(client, pid).await?
                 }
-                Err(DaemonError::Unavailable) => self.kill_dead_server(pid).await?,
+                Err(DaemonError::Unavailable(_)) => self.kill_dead_server(pid).await?,
                 Err(e) => return Err(DaemonConnectorError::Handshake(Box::new(e))),
             };
         }
@@ -127,7 +134,7 @@ impl DaemonConnector {
 
         let pidfile = self.pid_lock();
 
-        match pidfile.get_owner() {
+        match pidfile.get_owner()? {
             Some(pid) => {
                 debug!("found pid: {}", pid);
                 Ok(sysinfo::Pid::from(pid as usize))
@@ -169,6 +176,7 @@ impl DaemonConnector {
     /// On Windows the socket file cannot be interacted with via any filesystem
     /// apis, due to this we need to just naively attempt to connect on that
     /// platform and retry in case of error.
+    #[tracing::instrument(skip(self))]
     async fn get_connection(
         &self,
         path: turbopath::AbsoluteSystemPathBuf,
@@ -177,7 +185,7 @@ impl DaemonConnector {
         #[cfg(not(target_os = "windows"))]
         self.wait_for_socket().await?;
 
-        debug!("connecting to socket: {}", path.to_string_lossy());
+        debug!("connecting to socket: {}", path);
         let path = Arc::new(path);
 
         #[cfg(not(target_os = "windows"))]
@@ -193,18 +201,20 @@ impl DaemonConnector {
             async move { win(path) }
         };
 
-        // note, this endpoint is just a dummy. the actual path is passed in
+        // note, this endpoint is just a placeholder. the actual path is passed in via
+        // make_service
         Endpoint::try_from("http://[::]:50051")
             .expect("this is a valid uri")
-            .timeout(Duration::from_secs(1))
+            .timeout(Self::CONNECT_TIMEOUT)
             .connect_with_connector(tower::service_fn(make_service))
             .await
             .map(TurbodClient::new)
             .map_err(DaemonConnectorError::Socket)
     }
 
-    /// Kills a currently active server but shutting it down and waiting for it
+    /// Kills a currently active server by shutting it down and waiting for it
     /// to exit.
+    #[tracing::instrument(skip(self, client))]
     async fn kill_live_server(
         &self,
         client: DaemonClient<()>,
@@ -226,6 +236,7 @@ impl DaemonConnector {
     }
 
     /// Kills a server that is not responding.
+    #[tracing::instrument(skip(self))]
     async fn kill_dead_server(&self, pid: sysinfo::Pid) -> Result<(), DaemonConnectorError> {
         let lock = self.pid_lock();
 
@@ -234,7 +245,7 @@ impl DaemonConnector {
         );
 
         let owner = lock
-            .get_owner()
+            .get_owner()?
             .and_then(|p| system.process(sysinfo::Pid::from(p as usize)));
 
         // if the pidfile is owned by the same pid as the one we found, kill it
@@ -254,7 +265,18 @@ impl DaemonConnector {
         }
     }
 
+    #[tracing::instrument(skip(self))]
     async fn wait_for_socket(&self) -> Result<(), DaemonConnectorError> {
+        // Note that we don't care if this is our daemon
+        // or not. We started a process, but someone else could beat
+        // use to listening. That's fine, we'll check the version
+        // later. However, we need to ensure that _some_ pid file
+        // exists to protect against stale .sock files
+        timeout(
+            Self::SOCKET_TIMEOUT,
+            wait_for_file(&self.pid_file, WaitAction::Exists),
+        )
+        .await??;
         timeout(
             Self::SOCKET_TIMEOUT,
             wait_for_file(&self.sock_file, WaitAction::Exists),
@@ -292,6 +314,7 @@ pub enum FileWaitError {
 ///
 /// It does this by watching the parent directory of the path, and waiting for
 /// events on that path.
+#[tracing::instrument]
 async fn wait_for_file(
     path: &turbopath::AbsoluteSystemPathBuf,
     action: WaitAction,
@@ -327,10 +350,11 @@ async fn wait_for_file(
                 }),
                 WaitAction::Deleted,
             ) => {
-                if paths
-                    .iter()
-                    .any(|p| p.file_name().map(|f| file_name.eq(f)).unwrap_or_default())
-                {
+                if paths.iter().any(|p| {
+                    p.file_name()
+                        .map(|f| OsStr::new(&file_name).eq(f))
+                        .unwrap_or_default()
+                }) {
                     futures::executor::block_on(async {
                         // if the receiver is dropped, it is because the future has
                         // been cancelled, so we don't need to do anything
@@ -347,7 +371,7 @@ async fn wait_for_file(
     std::fs::create_dir_all(parent.as_path())?;
 
     debug!("watching {:?}", parent);
-    watcher.watch(parent.as_path(), notify::RecursiveMode::NonRecursive)?;
+    watcher.watch(parent.as_std_path(), notify::RecursiveMode::NonRecursive)?;
 
     match (action, path.exists()) {
         (WaitAction::Exists, false) => {}
@@ -373,10 +397,7 @@ enum WaitAction {
 
 #[cfg(test)]
 mod test {
-    use std::{
-        assert_matches::assert_matches,
-        path::{Path, PathBuf},
-    };
+    use std::{assert_matches::assert_matches, path::Path};
 
     use sysinfo::Pid;
     use tokio::{
@@ -387,7 +408,7 @@ mod test {
     use turbopath::AbsoluteSystemPathBuf;
 
     use super::*;
-    use crate::daemon::client::proto;
+    use crate::daemon::proto;
 
     #[cfg(not(target_os = "windows"))]
     const NODE_EXE: &str = "node";
@@ -395,11 +416,11 @@ mod test {
     const NODE_EXE: &str = "node.exe";
 
     fn pid_path(tmp_path: &Path) -> AbsoluteSystemPathBuf {
-        AbsoluteSystemPathBuf::new(tmp_path.join("turbod.pid")).unwrap()
+        AbsoluteSystemPathBuf::try_from(tmp_path.join("turbod.pid")).unwrap()
     }
 
     fn sock_path(tmp_path: &Path) -> AbsoluteSystemPathBuf {
-        AbsoluteSystemPathBuf::new(tmp_path.join("turbod.sock")).unwrap()
+        AbsoluteSystemPathBuf::try_from(tmp_path.join("turbod.sock")).unwrap()
     }
 
     #[tokio::test]
@@ -419,7 +440,7 @@ mod test {
 
         assert_matches!(
             connector.get_or_start_daemon().await,
-            Err(DaemonConnectorError::NotRunning)
+            Err(DaemonConnectorError::PidFile(PidFileError::Invalid { .. }))
         );
     }
 
@@ -471,7 +492,7 @@ mod test {
         let tmp_path = tmp_dir.path().to_owned();
 
         let pid = pid_path(&tmp_path);
-        std::fs::write(&pid, usize::MAX.to_string()).unwrap();
+        std::fs::write(&pid, i32::MAX.to_string()).unwrap();
         let sock = sock_path(&tmp_path);
         std::fs::write(&sock, "").unwrap();
 
@@ -487,7 +508,10 @@ mod test {
             Ok(())
         );
 
-        assert!(connector.pid_file.exists(), "pid file should still exist");
+        assert!(
+            !connector.pid_file.exists(),
+            "pid file should be cleaned up when getting the owner of a stale pid"
+        );
     }
 
     #[tokio::test]
@@ -584,9 +608,13 @@ mod test {
 
         async fn hello(
             &self,
-            _req: tonic::Request<proto::HelloRequest>,
+            request: tonic::Request<proto::HelloRequest>,
         ) -> tonic::Result<tonic::Response<proto::HelloResponse>> {
-            unimplemented!()
+            let client_version = request.into_inner().version;
+            Err(tonic::Status::failed_precondition(format!(
+                "version mismatch. Client {} Server test-version",
+                client_version
+            )))
         }
 
         async fn status(
@@ -607,6 +635,13 @@ mod test {
             &self,
             _req: tonic::Request<proto::GetChangedOutputsRequest>,
         ) -> tonic::Result<tonic::Response<proto::GetChangedOutputsResponse>> {
+            unimplemented!()
+        }
+
+        async fn discover_packages(
+            &self,
+            _req: tonic::Request<proto::DiscoverPackagesRequest>,
+        ) -> Result<tonic::Response<proto::DiscoverPackagesResponse>, tonic::Status> {
             unimplemented!()
         }
     }
@@ -632,13 +667,13 @@ mod test {
 
         let (pid_file, sock_file) = if cfg!(windows) {
             (
-                AbsoluteSystemPathBuf::new(PathBuf::from("C:\\pid")).unwrap(),
-                AbsoluteSystemPathBuf::new(PathBuf::from("C:\\sock")).unwrap(),
+                AbsoluteSystemPathBuf::new("C:\\pid").unwrap(),
+                AbsoluteSystemPathBuf::new("C:\\sock").unwrap(),
             )
         } else {
             (
-                AbsoluteSystemPathBuf::new(PathBuf::from("/pid")).unwrap(),
-                AbsoluteSystemPathBuf::new(PathBuf::from("/sock")).unwrap(),
+                AbsoluteSystemPathBuf::new("/pid").unwrap(),
+                AbsoluteSystemPathBuf::new("/sock").unwrap(),
             )
         };
 
@@ -650,7 +685,7 @@ mod test {
             can_start_server: false,
         };
 
-        let client = Endpoint::try_from("http://[::]:50051")
+        let mut client = Endpoint::try_from("http://[::]:50051")
             .expect("this is a valid uri")
             .connect_with_connector(tower::service_fn(move |_| {
                 // when a connection is made, create a duplex stream and send it to the server
@@ -667,6 +702,19 @@ mod test {
             .map(TurbodClient::new)
             .unwrap();
 
+        // spawn the future for the server so that it responds to
+        // the hello request
+        let server_fut = tokio::spawn(server_fut);
+
+        let hello_resp: DaemonError = client
+            .hello(proto::HelloRequest {
+                version: "version-mismatch".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap_err()
+            .into();
+        assert_matches!(hello_resp, DaemonError::VersionMismatch(_));
         let client = DaemonClient::new(client);
 
         let shutdown_fut = conn.kill_live_server(client, Pid::from(1000));

@@ -1,5 +1,4 @@
 import cn from "classnames";
-
 import type { ReactNode } from "react";
 
 export type BadgeProps = React.ComponentProps<"span"> & {
@@ -7,7 +6,7 @@ export type BadgeProps = React.ComponentProps<"span"> & {
   className?: string;
 };
 
-export default function Badge(props: BadgeProps) {
+export function Badge(props: BadgeProps) {
   const { children, className, ...rest } = props;
 
   return (

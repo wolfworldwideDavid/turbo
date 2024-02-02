@@ -1,20 +1,27 @@
+import path from "node:path";
 import retry from "async-retry";
 import chalk from "chalk";
-import fs from "fs-extra";
-import path from "path";
-
+import { mkdir, readJsonSync, existsSync } from "fs-extra";
+import * as logger from "./logger";
 import {
   downloadAndExtractExample,
   downloadAndExtractRepo,
   getRepoInfo,
   existsInRepo,
-  isFolderEmpty,
-  isWriteable,
   hasRepo,
   type RepoInfo,
-} from "./";
+} from "./examples";
+import { isWriteable } from "./isWriteable";
+import { isFolderEmpty } from "./isFolderEmpty";
+import type { PackageJson } from "./types";
 
-import { turboLoader, error } from "./logger";
+function isErrorLike(err: unknown): err is { message: string } {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    typeof (err as { message?: unknown }).message === "string"
+  );
+}
 
 export class DownloadError extends Error {}
 
@@ -37,84 +44,96 @@ export async function createProject({
   let repoInfo: RepoInfo | undefined;
   let repoUrl: URL | undefined;
 
-  try {
-    repoUrl = new URL(example);
-  } catch (err: any) {
-    if (err.code !== "ERR_INVALID_URL") {
-      error(err);
-      process.exit(1);
-    }
-  }
-
-  if (repoUrl) {
-    if (repoUrl.origin !== "https://github.com") {
-      error(
-        `Invalid URL: ${chalk.red(
-          `"${example}"`
-        )}. Only GitHub repositories are supported. Please use a GitHub URL and try again.`
-      );
-      process.exit(1);
-    }
-
-    repoInfo = await getRepoInfo(repoUrl, examplePath);
-
-    if (!repoInfo) {
-      error(
-        `Unable to fetch repository information from: ${chalk.red(
-          `"${example}"`
-        )}. Please fix the URL and try again.`
-      );
-      process.exit(1);
-    }
-
-    const found = await hasRepo(repoInfo);
-
-    if (!found) {
-      error(
-        `Could not locate the repository for ${chalk.red(
-          `"${example}"`
-        )}. Please check that the repository exists and try again.`
-      );
-      process.exit(1);
-    }
+  if (isDefaultExample) {
+    repoInfo = {
+      username: "vercel",
+      name: "turbo",
+      branch: "main",
+      filePath: "examples/basic",
+    };
   } else {
-    const found = await existsInRepo(example);
+    try {
+      repoUrl = new URL(example);
+    } catch (err: unknown) {
+      const urlError = err as Error & { code?: string };
+      if (urlError.code !== "ERR_INVALID_URL") {
+        logger.error(err);
+        process.exit(1);
+      }
+    }
 
-    if (!found) {
-      error(
-        `Could not locate an example named ${chalk.red(
-          `"${example}"`
-        )}. It could be due to the following:\n`,
-        `1. Your spelling of example ${chalk.red(
-          `"${example}"`
-        )} might be incorrect.\n`,
-        `2. You might not be connected to the internet or you are behind a proxy.`
-      );
-      process.exit(1);
+    if (repoUrl) {
+      if (repoUrl.origin !== "https://github.com") {
+        logger.error(
+          `Invalid URL: ${chalk.red(
+            `"${example}"`
+          )}. Only GitHub repositories are supported. Please use a GitHub URL and try again.`
+        );
+        process.exit(1);
+      }
+
+      repoInfo = await getRepoInfo(repoUrl, examplePath);
+
+      if (!repoInfo) {
+        logger.error(
+          `Unable to fetch repository information from: ${chalk.red(
+            `"${example}"`
+          )}. Please fix the URL and try again.`
+        );
+        process.exit(1);
+      }
+
+      const found = await hasRepo(repoInfo);
+
+      if (!found) {
+        logger.error(
+          `Could not locate the repository for ${chalk.red(
+            `"${example}"`
+          )}. Please check that the repository exists and try again.`
+        );
+        process.exit(1);
+      }
+    } else {
+      const found = await existsInRepo(example);
+
+      if (!found) {
+        logger.error(
+          `Could not locate an example named ${chalk.red(
+            `"${example}"`
+          )}. It could be due to the following:\n`,
+          `1. Your spelling of example ${chalk.red(
+            `"${example}"`
+          )} might be incorrect.\n`,
+          `2. You might not be connected to the internet or you are behind a proxy.`
+        );
+        process.exit(1);
+      }
     }
   }
 
   const root = path.resolve(appPath);
 
   if (!(await isWriteable(path.dirname(root)))) {
-    error(
+    logger.error(
       "The application path is not writable, please check folder permissions and try again."
     );
-    error("It is likely you do not have write permissions for this folder.");
+    logger.error(
+      "It is likely you do not have write permissions for this folder."
+    );
     process.exit(1);
   }
 
   const appName = path.basename(root);
   try {
-    await fs.mkdir(root, { recursive: true });
+    await mkdir(root, { recursive: true });
   } catch (err) {
-    error("Unable to create project directory");
-    console.error(err);
+    logger.error("Unable to create project directory");
+    logger.error(err);
     process.exit(1);
   }
   const { isEmpty, conflicts } = isFolderEmpty(root);
   if (!isEmpty) {
-    error(
+    logger.error(
       `${chalk.dim(root)} has ${conflicts.length} conflicting ${
         conflicts.length === 1 ? "file" : "files"
       } - please try a different location`
@@ -128,52 +147,48 @@ export async function createProject({
   /**
    * clone the example repository
    */
-  const loader = turboLoader("Downloading files...");
+  const loader = logger.turboLoader("Downloading files...");
   try {
-    if (repoInfo) {
-      console.log(
+    if (!isDefaultExample && repoInfo) {
+      logger.log(
         `\nDownloading files from repo ${chalk.cyan(
           example
         )}. This might take a moment.`
       );
-      console.log();
+      logger.log();
       loader.start();
-      await retry(() => downloadAndExtractRepo(root, repoInfo as RepoInfo), {
+      // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- this is type guarded above (wtf TS)
+      await retry(() => downloadAndExtractRepo(root, repoInfo!), {
         retries: 3,
       });
     } else {
-      console.log(
+      logger.log(
         `\nDownloading files${
           !isDefaultExample ? ` for example ${chalk.cyan(example)}` : ""
         }. This might take a moment.`
       );
-      console.log();
+      logger.log();
       loader.start();
       await retry(() => downloadAndExtractExample(root, example), {
         retries: 3,
       });
     }
   } catch (reason) {
-    function isErrorLike(err: unknown): err is { message: string } {
-      return (
-        typeof err === "object" &&
-        err !== null &&
-        typeof (err as { message?: unknown }).message === "string"
-      );
-    }
-    throw new DownloadError(isErrorLike(reason) ? reason.message : reason + "");
+    throw new DownloadError(
+      isErrorLike(reason) ? reason.message : String(reason)
+    );
   } finally {
     loader.stop();
   }
 
   const rootPackageJsonPath = path.join(root, "package.json");
-  const hasPackageJson = fs.existsSync(rootPackageJsonPath);
+  const hasPackageJson = existsSync(rootPackageJsonPath);
   const availableScripts = [];
 
   if (hasPackageJson) {
     let packageJsonContent;
     try {
-      packageJsonContent = fs.readJsonSync(rootPackageJsonPath);
+      packageJsonContent = readJsonSync(rootPackageJsonPath) as PackageJson;
     } catch {
       // ignore
     }

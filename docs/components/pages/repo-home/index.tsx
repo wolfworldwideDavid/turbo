@@ -1,10 +1,10 @@
+import { GradientSectionBorder } from "../home-shared/GradientSectionBorder";
+import { LandingPageGlobalStyles } from "../home-shared/GlobalStyles";
 import { RepoHero } from "./RepoHero";
 import { RepoFeatures } from "./RepoFeatures";
 import { RepoLetter } from "./RepoLetter";
-import { GradientSectionBorder } from "../home-shared/GradientSectionBorder";
-import { LandingPageGlobalStyles } from "../home-shared/GlobalStyles";
 
-export default function Home() {
+export function TurborepoHome() {
   return (
     <>
       <LandingPageGlobalStyles />

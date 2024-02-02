@@ -1,18 +1,17 @@
+import type { ReactElement } from "react";
 import React, { createElement } from "react";
 import { ImageResponse } from "@vercel/og";
-
-import PackLogo from "../../components/logos/og/PackLogo";
-import RepoLogo from "../../components/logos/og/RepoLogo";
-import TurboLogo from "../../components/logos/og/TurboLogo";
-import VercelLogo from "../../components/logos/og/VercelLogo";
-
 import type { NextApiRequest } from "next/index";
+import { PackLogo } from "../../components/logos/og/PackLogo";
+import { RepoLogo } from "../../components/logos/og/RepoLogo";
+import { TurboLogo } from "../../components/logos/og/TurboLogo";
+import { VercelLogo } from "../../components/logos/og/VercelLogo";
 
-function _arrayBufferToBase64(buffer) {
-  var binary = "";
-  var bytes = new Uint8Array(buffer);
-  var len = bytes.byteLength;
-  for (var i = 0; i < len; i++) {
+function _arrayBufferToBase64(buffer: ArrayBuffer) {
+  let binary = "";
+  const bytes = new Uint8Array(buffer);
+  const len = bytes.byteLength;
+  for (let i = 0; i < len; i++) {
     binary += String.fromCharCode(bytes[i]);
   }
   return btoa(binary);
@@ -59,24 +58,35 @@ async function loadAssets(): Promise<
   ];
 }
 
+// ?type=<pack|repo>
+const TITLE_FOR_TYPE: Record<string, string> = {
+  pack: "The successor to Webpack",
+  repo: "The build system that makes ship happen",
+};
+
 export default async function openGraphImage(
   req: NextApiRequest
 ): Promise<ImageResponse> {
   try {
     const [fonts, bg] = await loadAssets();
-    const { searchParams } = new URL(req.url);
+
+    // eslint-disable-next-line @typescript-eslint/no-non-null-assertion -- It's safe for us to assume that this is coming from `http.Server` here.
+    const { searchParams } = new URL(req.url!);
 
     const type = searchParams.get("type");
 
-    // ?title=<title>
-    const hasTitle = searchParams.has("title");
-    const title = hasTitle
-      ? searchParams.get("title")?.slice(0, 100)
-      : type === "pack"
-      ? "The successor to Webpack"
-      : type === "repo"
-      ? "The build system that makes ship happen"
-      : "";
+    if (!type) {
+      throw new Error("No type provided to /api/og.");
+    }
+
+    // Start with the default title for the type
+    let title = TITLE_FOR_TYPE[type];
+
+    // If there's a ?title=<title> query param, always prefer that.
+    if (searchParams.has("title")) {
+      // @ts-expect-error -- We just checked .has so we know its there.
+      title = searchParams.get("title").slice(0, 100);
+    }
 
     return new ImageResponse(createElement(OGImage, { title, type, bg }), {
       width: 1200,
@@ -101,7 +111,7 @@ export function OGImage({
   title: string;
   type: string;
   bg: string;
-}): JSX.Element {
+}): ReactElement {
   return (
     <div
       style={{
@@ -119,15 +129,9 @@ export function OGImage({
         color: "#fff",
       }}
     >
-      {/* eslint-disable-next-line  @next/next/no-img-element, jsx-a11y/alt-text */}
+      {}
       <div style={{ display: "flex", height: 97 * 1.1, alignItems: "center" }}>
-        {type === "pack" ? (
-          <PackLogo height={103 * 1.1} width={697 * 1.1} />
-        ) : type === "repo" ? (
-          <RepoLogo height={83 * 1.1} width={616 * 1.1} />
-        ) : (
-          <TurboLogo height={97 * 1.1} width={459 * 1.1} />
-        )}
+        <Logo type={type} />
       </div>
       {title ? (
         <div
@@ -160,6 +164,18 @@ export function OGImage({
       </div>
     </div>
   );
+}
+
+function Logo({ type }: { type: string | undefined }): ReactElement {
+  if (type === "pack") {
+    return <PackLogo height={103 * 1.1} width={697 * 1.1} />;
+  }
+
+  if (type === "repo") {
+    return <RepoLogo height={83 * 1.1} width={616 * 1.1} />;
+  }
+
+  return <TurboLogo height={97 * 1.1} width={459 * 1.1} />;
 }
 
 export const config = {

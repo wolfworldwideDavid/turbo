@@ -1,4 +1,5 @@
 const { withSentryConfig } = require("@sentry/nextjs");
+const withVercelToolbar = require("@vercel/toolbar/plugins/next")();
 const withNextra = require("nextra")({
   theme: "nextra-theme-docs",
   themeConfig: "./theme.config.tsx",
@@ -61,6 +62,9 @@ const nextConfig = withNextra({
   reactStrictMode: true,
   experimental: {
     legacyBrowsers: false,
+  },
+  eslint: {
+    ignoreDuringBuilds: true,
   },
   webpack: (config, { webpack }) => {
     config.plugins.push(
@@ -138,105 +142,59 @@ const nextConfig = withNextra({
       },
       {
         source: "/discord{/}?",
-        permanent: true,
         destination: "https://discord.gg/sSzyjxvbf5",
+        permanent: true,
       },
       {
         source: "/docs/changelog",
-        permanent: true,
         destination: "https://github.com/vercel/turbo/releases",
+        permanent: true,
       },
       {
         source: "/docs/guides/complimentary-tools",
-        permanent: true,
         destination: "/repo/docs/handbook",
+        permanent: true,
       },
       {
         source: "/docs/guides/monorepo-tools",
-        permanent: true,
         destination: "/repo/docs/handbook",
+        permanent: true,
       },
       {
         source: "/docs/glossary",
-        permanent: true,
         destination: "/repo/docs/handbook",
+        permanent: true,
       },
       {
         source: "/docs/guides/continuous-integration",
-        permanent: true,
         destination: "/repo/docs/ci",
+        permanent: true,
       },
       {
         source: "/repo/docs/handbook/prisma",
-        permanent: true,
         destination: "/repo/docs/handbook/tools/prisma",
+        permanent: true,
       },
       {
         source: "/pack/docs/comparisons/turbopack-vs-vite",
-        permanent: true,
         destination: "/pack/docs/comparisons/vite",
+        permanent: true,
       },
       {
         source: "/pack/docs/comparisons/turbopack-vs-webpack",
-        permanent: true,
         destination: "/pack/docs/comparisons/webpack",
-      },
-      {
-        // Accidentally created, eventually removable. See below.
-        source: "/repo/docs/core-concepts/running-tasks",
-        destination: "/repo/docs/core-concepts/monorepos/running-tasks",
         permanent: true,
       },
       {
-        // Accidentally created, eventually removable. See below.
-        source: "/repo/docs/core-concepts/why-turborepo",
-        destination: "/repo/docs/core-concepts/monorepos",
+        // Redirect old blog posts to new blog.
+        source: "/posts/:path*",
+        destination: "/blog/:path*",
         permanent: true,
-      },
-      {
-        // Accidentally created, eventually removable. See below.
-        source: "/repo/docs/core-concepts/filtering",
-        destination: "/repo/docs/core-concepts/monorepos/filtering",
-        permanent: true,
-      },
-      {
-        // Accidentally created, eventually removable. See below.
-        source: "/repo/docs/core-concepts/pipelines",
-        destination: "/repo/docs/core-concepts/monorepos/running-tasks",
-        permanent: true,
-      },
-      {
-        // This rule accidentally created a bunch of URLs.
-        //
-        // They've _never_ resolved, so _eventually_ we should be able to remove the
-        // redirects we added above to fix them.
-        source: "/docs/features/:path*",
-        permanent: true,
-        destination: "/repo/docs/core-concepts/:path*",
-      },
-      {
-        // Accidentally created, eventually removable. See below.
-        source: "/repo/docs/getting-started",
-        destination: "/repo/docs",
-        permanent: true,
-      },
-      {
-        // Accidentally created, eventually removable. See below.
-        source: "/repo/docs/guides/workspaces",
-        destination: "/repo/docs/handbook/workspaces",
-        permanent: true,
-      },
-      {
-        // This rule accidentally created a bunch of URLs.
-        //
-        // They've _never_ resolved, so _eventually_ we should be able to remove the
-        // redirects we added above to fix them.
-        source: "/docs/:path*",
-        permanent: true,
-        destination: "/repo/docs/:path*",
       },
     ];
   },
 });
 
-module.exports = withSentryConfig(nextConfig, sentryWebpackPluginOptions);
+module.exports = withVercelToolbar(
+  withSentryConfig(nextConfig, sentryWebpackPluginOptions)
+);

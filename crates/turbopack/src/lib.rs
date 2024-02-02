@@ -3,48 +3,9 @@
 #![feature(min_specialization)]
 #![feature(map_try_insert)]
 #![feature(option_get_or_insert_default)]
-#![feature(once_cell)]
 #![feature(hash_set_entry)]
 #![recursion_limit = "256"]
-
-use std::{
-    collections::{HashMap, HashSet},
-    mem::swap,
-};
-
-use anyhow::Result;
-use css::{CssModuleAssetVc, ModuleCssModuleAssetVc};
-use ecmascript::{
-    tree_shake::asset::EcmascriptModulePartAssetVc,
-    typescript::resolve::TypescriptTypesAssetReferenceVc, EcmascriptModuleAssetType,
-    EcmascriptModuleAssetVc,
-};
-use graph::{aggregate, AggregatedGraphNodeContent, AggregatedGraphVc};
-use module_options::{
-    ModuleOptionsContextVc, ModuleOptionsVc, ModuleRuleEffect, ModuleType, ModuleTypeVc,
-};
-pub use resolve::resolve_options;
-use turbo_tasks::{
-    primitives::{BoolVc, StringVc},
-    CompletionVc, Value,
-};
-use turbo_tasks_fs::FileSystemPathVc;
-use turbopack_core::{
-    asset::{Asset, AssetVc},
-    compile_time_info::CompileTimeInfoVc,
-    context::{AssetContext, AssetContextVc},
-    ident::AssetIdentVc,
-    issue::{Issue, IssueVc},
-    plugin::CustomModuleType,
-    reference::all_referenced_assets,
-    reference_type::{EcmaScriptModulesReferenceSubType, ReferenceType},
-    resolve::{
-        options::ResolveOptionsVc, origin::PlainResolveOriginVc, parse::RequestVc, resolve,
-        ModulePartVc, ResolveResultVc,
-    },
-};
-
-use crate::transition::Transition;
+#![feature(arbitrary_self_types)]
 
 pub mod condition;
 pub mod evaluate_context;
@@ -56,191 +17,354 @@ pub mod resolve_options_context;
 pub mod transition;
 pub(crate) mod unsupported_sass;
 
+use std::{
+    collections::{HashMap, HashSet},
+    mem::swap,
+};
+
+use anyhow::{bail, Result};
+use css::{CssModuleAsset, GlobalCssAsset, ModuleCssAsset};
+use ecmascript::{
+    chunk::EcmascriptChunkPlaceable,
+    references::{follow_reexports, FollowExportsResult},
+    side_effect_optimization::facade::module::EcmascriptModuleFacadeModule,
+    typescript::resolve::type_resolve,
+    EcmascriptModuleAsset, EcmascriptModuleAssetType, TreeShakingMode,
+};
+use graph::{aggregate, AggregatedGraph, AggregatedGraphNodeContent};
+use module_options::{ModuleOptions, ModuleOptionsContext, ModuleRuleEffect, ModuleType};
+pub use resolve::resolve_options;
+use tracing::Instrument;
+use turbo_tasks::{Completion, Value, ValueToString, Vc};
+use turbo_tasks_fs::FileSystemPath;
+use turbopack_core::{
+    asset::Asset,
+    compile_time_info::CompileTimeInfo,
+    context::{AssetContext, ProcessResult},
+    ident::AssetIdent,
+    issue::{Issue, IssueExt, OptionStyledString, StyledString},
+    module::Module,
+    output::OutputAsset,
+    raw_module::RawModule,
+    reference_type::{
+        CssReferenceSubType, EcmaScriptModulesReferenceSubType, InnerAssets, ReferenceType,
+    },
+    resolve::{
+        options::ResolveOptions, origin::PlainResolveOrigin, parse::Request, resolve, ModulePart,
+        ModuleResolveResult, ModuleResolveResultItem, ResolveResult,
+    },
+    source::Source,
+};
 pub use turbopack_css as css;
 pub use turbopack_ecmascript as ecmascript;
-use turbopack_json::JsonModuleAssetVc;
-use turbopack_mdx::MdxModuleAssetVc;
-use turbopack_static::StaticModuleAssetVc;
+use turbopack_json::JsonModuleAsset;
+use turbopack_mdx::MdxModuleAsset;
+use turbopack_static::StaticModuleAsset;
+use turbopack_wasm::{module_asset::WebAssemblyModuleAsset, source::WebAssemblySource};
 
 use self::{
-    resolve_options_context::ResolveOptionsContextVc,
-    transition::{TransitionVc, TransitionsByNameVc},
+    module_options::CustomModuleType,
+    resolve_options_context::ResolveOptionsContext,
+    transition::{Transition, TransitionsByName},
 };
 
 #[turbo_tasks::value]
 struct ModuleIssue {
-    ident: AssetIdentVc,
-    title: StringVc,
-    description: StringVc,
+    ident: Vc<AssetIdent>,
+    title: Vc<StyledString>,
+    description: Vc<StyledString>,
 }
 
 #[turbo_tasks::value_impl]
 impl Issue for ModuleIssue {
     #[turbo_tasks::function]
-    fn category(&self) -> StringVc {
-        StringVc::cell("other".to_string())
+    fn category(&self) -> Vc<String> {
+        Vc::cell("other".to_string())
     }
 
     #[turbo_tasks::function]
-    fn context(&self) -> FileSystemPathVc {
+    fn file_path(&self) -> Vc<FileSystemPath> {
         self.ident.path()
     }
 
     #[turbo_tasks::function]
-    fn title(&self) -> StringVc {
+    fn title(&self) -> Vc<StyledString> {
         self.title
     }
 
     #[turbo_tasks::function]
-    fn description(&self) -> StringVc {
-        self.description
+    fn description(&self) -> Vc<OptionStyledString> {
+        Vc::cell(Some(self.description))
     }
 }
 
 #[turbo_tasks::function]
 async fn apply_module_type(
-    source: AssetVc,
-    context: ModuleAssetContextVc,
-    module_type: ModuleTypeVc,
-    part: Option<ModulePartVc>,
-) -> Result<AssetVc> {
-    Ok(match &*module_type.await? {
+    source: Vc<Box<dyn Source>>,
+    module_asset_context: Vc<ModuleAssetContext>,
+    module_type: Vc<ModuleType>,
+    reference_type: Value<ReferenceType>,
+    part: Option<Vc<ModulePart>>,
+    inner_assets: Option<Vc<InnerAssets>>,
+    runtime_code: bool,
+) -> Result<Vc<ProcessResult>> {
+    let module_type = &*module_type.await?;
+    Ok(ProcessResult::Module(match module_type {
         ModuleType::Ecmascript {
             transforms,
             options,
+        }
+        | ModuleType::Typescript {
+            transforms,
+            tsx: _,
+            analyze_types: _,
+            options,
+        }
+        | ModuleType::TypescriptDeclaration {
+            transforms,
+            options,
         } => {
-            let base = EcmascriptModuleAssetVc::new(
-                source,
-                context.into(),
-                Value::new(EcmascriptModuleAssetType::Ecmascript),
-                *transforms,
-                Value::new(*options),
-                context.compile_time_info(),
-            );
-
-            if options.split_into_parts {
-                if let Some(part) = part {
-                    if let Ok(v) = EcmascriptModulePartAssetVc::new(base, part) {
-                        return Ok(v.into());
-                    }
+            let context_for_module = match module_type {
+                ModuleType::Typescript { analyze_types, .. } if *analyze_types => {
+                    module_asset_context.with_types_resolving_enabled()
                 }
+                ModuleType::TypescriptDeclaration { .. } => {
+                    module_asset_context.with_types_resolving_enabled()
+                }
+                _ => module_asset_context,
+            };
+            let mut builder = EcmascriptModuleAsset::builder(
+                source,
+                Vc::upcast(context_for_module),
+                *transforms,
+                *options,
+                module_asset_context.compile_time_info(),
+            );
+            match module_type {
+                ModuleType::Ecmascript { .. } => {
+                    builder = builder.with_type(EcmascriptModuleAssetType::Ecmascript)
+                }
+                ModuleType::Typescript {
+                    tsx, analyze_types, ..
+                } => {
+                    builder = builder.with_type(EcmascriptModuleAssetType::Typescript {
+                        tsx: *tsx,
+                        analyze_types: *analyze_types,
+                    })
+                }
+                ModuleType::TypescriptDeclaration { .. } => {
+                    builder = builder.with_type(EcmascriptModuleAssetType::TypescriptDeclaration)
+                }
+                _ => unreachable!(),
             }
 
-            base.into()
+            if let Some(inner_assets) = inner_assets {
+                builder = builder.with_inner_assets(inner_assets);
+            }
+
+            if runtime_code {
+                Vc::upcast(builder.build())
+            } else {
+                match options.tree_shaking_mode {
+                    Some(TreeShakingMode::ModuleFragments) => {
+                        if let Some(part) = part {
+                            Vc::upcast(builder.build_part(part))
+                        } else {
+                            Vc::upcast(builder.build_part(ModulePart::exports()))
+                        }
+                    }
+                    Some(TreeShakingMode::ReexportsOnly) => {
+                        let module = builder.build();
+                        if let Some(part) = part {
+                            match *part.await? {
+                                ModulePart::Evaluation => {
+                                    if *module.is_marked_as_side_effect_free().await? {
+                                        return Ok(ProcessResult::Ignore.cell());
+                                    }
+                                    if *module.get_exports().needs_facade().await? {
+                                        Vc::upcast(EcmascriptModuleFacadeModule::new(
+                                            Vc::upcast(module),
+                                            part,
+                                        ))
+                                    } else {
+                                        Vc::upcast(module)
+                                    }
+                                }
+                                ModulePart::Export(_) => {
+                                    if *module.get_exports().needs_facade().await? {
+                                        apply_reexport_tree_shaking(
+                                            Vc::upcast(EcmascriptModuleFacadeModule::new(
+                                                Vc::upcast(module),
+                                                ModulePart::exports(),
+                                            )),
+                                            part,
+                                        )
+                                    } else {
+                                        apply_reexport_tree_shaking(Vc::upcast(module), part)
+                                    }
+                                }
+                                _ => bail!(
+                                    "Invalid module part for reexports only tree shaking mode"
+                                ),
+                            }
+                        } else if *module.get_exports().needs_facade().await? {
+                            Vc::upcast(EcmascriptModuleFacadeModule::new(
+                                Vc::upcast(module),
+                                ModulePart::facade(),
+                            ))
+                        } else {
+                            Vc::upcast(module)
+                        }
+                    }
+                    None => Vc::upcast(builder.build()),
+                }
+            }
         }
-        ModuleType::Typescript {
-            transforms,
-            options,
-        } => EcmascriptModuleAssetVc::new(
+        ModuleType::Json => Vc::upcast(JsonModuleAsset::new(source)),
+        ModuleType::Raw => Vc::upcast(RawModule::new(source)),
+        ModuleType::CssGlobal => Vc::upcast(GlobalCssAsset::new(
             source,
-            context.into(),
-            Value::new(EcmascriptModuleAssetType::Typescript),
-            *transforms,
-            Value::new(*options),
-            context.compile_time_info(),
-        )
-        .into(),
-        ModuleType::TypescriptWithTypes {
-            transforms,
-            options,
-        } => EcmascriptModuleAssetVc::new(
+            Vc::upcast(module_asset_context),
+        )),
+        ModuleType::CssModule => Vc::upcast(ModuleCssAsset::new(
             source,
-            context.with_types_resolving_enabled().into(),
-            Value::new(EcmascriptModuleAssetType::TypescriptWithTypes),
-            *transforms,
-            Value::new(*options),
-            context.compile_time_info(),
-        )
-        .into(),
-        ModuleType::TypescriptDeclaration {
-            transforms,
-            options,
-        } => EcmascriptModuleAssetVc::new(
+            Vc::upcast(module_asset_context),
+        )),
+        ModuleType::Css {
+            ty,
+            use_lightningcss,
+        } => Vc::upcast(CssModuleAsset::new(
             source,
-            context.with_types_resolving_enabled().into(),
-            Value::new(EcmascriptModuleAssetType::TypescriptDeclaration),
-            *transforms,
-            Value::new(*options),
-            context.compile_time_info(),
-        )
-        .into(),
-        ModuleType::Json => JsonModuleAssetVc::new(source).into(),
-        ModuleType::Raw => source,
-        ModuleType::Css(transforms) => {
-            CssModuleAssetVc::new(source, context.into(), *transforms).into()
-        }
-        ModuleType::CssModule(transforms) => {
-            ModuleCssModuleAssetVc::new(source, context.into(), *transforms).into()
-        }
-        ModuleType::Static => StaticModuleAssetVc::new(source, context.into()).into(),
+            Vc::upcast(module_asset_context),
+            *ty,
+            *use_lightningcss,
+            if let ReferenceType::Css(CssReferenceSubType::AtImport(import)) =
+                reference_type.into_value()
+            {
+                import
+            } else {
+                None
+            },
+        )),
+        ModuleType::Static => Vc::upcast(StaticModuleAsset::new(
+            source,
+            Vc::upcast(module_asset_context),
+        )),
         ModuleType::Mdx {
             transforms,
             options,
-        } => MdxModuleAssetVc::new(source, context.into(), *transforms, *options).into(),
-        ModuleType::Custom(custom) => custom.create_module(source, context.into(), part),
+        } => Vc::upcast(MdxModuleAsset::new(
+            source,
+            Vc::upcast(module_asset_context),
+            *transforms,
+            *options,
+        )),
+        ModuleType::WebAssembly { source_ty } => Vc::upcast(WebAssemblyModuleAsset::new(
+            WebAssemblySource::new(source, *source_ty),
+            Vc::upcast(module_asset_context),
+        )),
+        ModuleType::Custom(custom) => custom.create_module(source, module_asset_context, part),
     })
+    .cell())
+}
+
+#[turbo_tasks::function]
+async fn apply_reexport_tree_shaking(
+    module: Vc<Box<dyn EcmascriptChunkPlaceable>>,
+    part: Vc<ModulePart>,
+) -> Result<Vc<Box<dyn Module>>> {
+    if let ModulePart::Export(export) = *part.await? {
+        let export = export.await?;
+        let FollowExportsResult {
+            module: final_module,
+            export_name: new_export,
+            ..
+        } = &*follow_reexports(module, export.clone_value()).await?;
+        let module = if let Some(new_export) = new_export {
+            if *new_export == *export {
+                Vc::upcast(*final_module)
+            } else {
+                Vc::upcast(EcmascriptModuleFacadeModule::new(
+                    *final_module,
+                    ModulePart::renamed_export(new_export.clone(), export.clone_value()),
+                ))
+            }
+        } else {
+            Vc::upcast(EcmascriptModuleFacadeModule::new(
+                *final_module,
+                ModulePart::renamed_namespace(export.clone_value()),
+            ))
+        };
+        return Ok(module);
+    }
+    Ok(Vc::upcast(module))
 }
 
 #[turbo_tasks::value]
 #[derive(Debug)]
 pub struct ModuleAssetContext {
-    pub transitions: TransitionsByNameVc,
-    pub compile_time_info: CompileTimeInfoVc,
-    pub module_options_context: ModuleOptionsContextVc,
-    pub resolve_options_context: ResolveOptionsContextVc,
-    transition: Option<TransitionVc>,
+    pub transitions: Vc<TransitionsByName>,
+    pub compile_time_info: Vc<CompileTimeInfo>,
+    pub module_options_context: Vc<ModuleOptionsContext>,
+    pub resolve_options_context: Vc<ResolveOptionsContext>,
+    pub layer: Vc<String>,
+    transition: Option<Vc<Box<dyn Transition>>>,
 }
 
 #[turbo_tasks::value_impl]
-impl ModuleAssetContextVc {
+impl ModuleAssetContext {
     #[turbo_tasks::function]
     pub fn new(
-        transitions: TransitionsByNameVc,
-        compile_time_info: CompileTimeInfoVc,
-        module_options_context: ModuleOptionsContextVc,
-        resolve_options_context: ResolveOptionsContextVc,
-    ) -> Self {
+        transitions: Vc<TransitionsByName>,
+        compile_time_info: Vc<CompileTimeInfo>,
+        module_options_context: Vc<ModuleOptionsContext>,
+        resolve_options_context: Vc<ResolveOptionsContext>,
+        layer: Vc<String>,
+    ) -> Vc<Self> {
         Self::cell(ModuleAssetContext {
             transitions,
             compile_time_info,
             module_options_context,
             resolve_options_context,
             transition: None,
+            layer,
         })
     }
 
     #[turbo_tasks::function]
     pub fn new_transition(
-        transitions: TransitionsByNameVc,
-        compile_time_info: CompileTimeInfoVc,
-        module_options_context: ModuleOptionsContextVc,
-        resolve_options_context: ResolveOptionsContextVc,
-        transition: TransitionVc,
-    ) -> Self {
+        transitions: Vc<TransitionsByName>,
+        compile_time_info: Vc<CompileTimeInfo>,
+        module_options_context: Vc<ModuleOptionsContext>,
+        resolve_options_context: Vc<ResolveOptionsContext>,
+        layer: Vc<String>,
+        transition: Vc<Box<dyn Transition>>,
+    ) -> Vc<Self> {
         Self::cell(ModuleAssetContext {
             transitions,
             compile_time_info,
             module_options_context,
             resolve_options_context,
+            layer,
             transition: Some(transition),
         })
     }
 
     #[turbo_tasks::function]
-    pub async fn module_options_context(self) -> Result<ModuleOptionsContextVc> {
+    pub async fn module_options_context(self: Vc<Self>) -> Result<Vc<ModuleOptionsContext>> {
         Ok(self.await?.module_options_context)
     }
 
     #[turbo_tasks::function]
-    pub async fn is_types_resolving_enabled(self) -> Result<BoolVc> {
-        let context = self.await?.resolve_options_context.await?;
-        Ok(BoolVc::cell(
-            context.enable_types && context.enable_typescript,
+    pub async fn is_types_resolving_enabled(self: Vc<Self>) -> Result<Vc<bool>> {
+        let resolve_options_context = self.await?.resolve_options_context.await?;
+        Ok(Vc::cell(
+            resolve_options_context.enable_types && resolve_options_context.enable_typescript,
         ))
     }
 
     #[turbo_tasks::function]
-    pub async fn with_types_resolving_enabled(self) -> Result<ModuleAssetContextVc> {
+    pub async fn with_types_resolving_enabled(self: Vc<Self>) -> Result<Vc<ModuleAssetContext>> {
         if *self.is_types_resolving_enabled().await? {
             return Ok(self);
         }
@@ -250,164 +374,233 @@ impl ModuleAssetContextVc {
             .with_types_enabled()
             .resolve()
             .await?;
-        Ok(ModuleAssetContextVc::new(
+
+        Ok(ModuleAssetContext::new(
             this.transitions,
             this.compile_time_info,
             this.module_options_context,
             resolve_options_context,
+            this.layer,
         ))
     }
 
     #[turbo_tasks::function]
-    async fn process_default(
-        self_vc: ModuleAssetContextVc,
-        source: AssetVc,
+    fn process_default(
+        self: Vc<Self>,
+        source: Vc<Box<dyn Source>>,
         reference_type: Value<ReferenceType>,
-    ) -> Result<AssetVc> {
-        let ident = source.ident().resolve().await?;
-        let options = ModuleOptionsVc::new(ident.path().parent(), self_vc.module_options_context());
+    ) -> Vc<ProcessResult> {
+        process_default(self, source, reference_type, Vec::new())
+    }
+}
 
-        let reference_type = reference_type.into_value();
-        let part = match &reference_type {
-            ReferenceType::EcmaScriptModules(EcmaScriptModulesReferenceSubType::ImportPart(
-                part,
-            )) => Some(*part),
-            _ => None,
-        };
-        let mut current_source = source;
-        let mut current_module_type = None;
-        for rule in options.await?.rules.iter() {
-            if rule
-                .matches(source, &*ident.path().await?, &reference_type)
-                .await?
-            {
-                for effect in rule.effects() {
-                    match effect {
-                        ModuleRuleEffect::SourceTransforms(transforms) => {
-                            current_source = transforms.transform(current_source);
-                            if current_source.ident().resolve().await? != ident {
-                                // The ident has been changed, so we need to apply new rules.
-                                return Ok(self_vc
-                                    .process_default(current_source, Value::new(reference_type)));
+#[turbo_tasks::function]
+async fn process_default(
+    module_asset_context: Vc<ModuleAssetContext>,
+    source: Vc<Box<dyn Source>>,
+    reference_type: Value<ReferenceType>,
+    processed_rules: Vec<usize>,
+) -> Result<Vc<ProcessResult>> {
+    let span = tracing::info_span!(
+        "process module",
+        name = *source.ident().to_string().await?,
+        reference_type = display(&*reference_type)
+    );
+    process_default_internal(
+        module_asset_context,
+        source,
+        reference_type,
+        processed_rules,
+    )
+    .instrument(span)
+    .await
+}
+
+async fn process_default_internal(
+    module_asset_context: Vc<ModuleAssetContext>,
+    source: Vc<Box<dyn Source>>,
+    reference_type: Value<ReferenceType>,
+    processed_rules: Vec<usize>,
+) -> Result<Vc<ProcessResult>> {
+    let ident = source.ident().resolve().await?;
+    let path_ref = ident.path().await?;
+    let options = ModuleOptions::new(
+        ident.path().parent(),
+        module_asset_context.module_options_context(),
+    );
+
+    let reference_type = reference_type.into_value();
+    let part: Option<Vc<ModulePart>> = match &reference_type {
+        ReferenceType::EcmaScriptModules(EcmaScriptModulesReferenceSubType::ImportPart(part)) => {
+            Some(*part)
+        }
+        _ => None,
+    };
+    let inner_assets = match &reference_type {
+        ReferenceType::Internal(inner_assets) => Some(*inner_assets),
+        _ => None,
+    };
+    let mut current_source = source;
+    let mut current_module_type = None;
+    for (i, rule) in options.await?.rules.iter().enumerate() {
+        if processed_rules.contains(&i) {
+            continue;
+        }
+        if rule.matches(source, &path_ref, &reference_type).await? {
+            for effect in rule.effects() {
+                match effect {
+                    ModuleRuleEffect::SourceTransforms(transforms) => {
+                        current_source = transforms.transform(current_source);
+                        if current_source.ident().resolve().await? != ident {
+                            // The ident has been changed, so we need to apply new rules.
+                            let mut processed_rules = processed_rules.clone();
+                            processed_rules.push(i);
+                            return Ok(process_default(
+                                module_asset_context,
+                                current_source,
+                                Value::new(reference_type),
+                                processed_rules,
+                            ));
+                        }
+                    }
+                    ModuleRuleEffect::ModuleType(module) => {
+                        current_module_type = Some(*module);
+                    }
+                    ModuleRuleEffect::ExtendEcmascriptTransforms { prepend, append } => {
+                        current_module_type = match current_module_type {
+                            Some(ModuleType::Ecmascript {
+                                transforms,
+                                options,
+                            }) => Some(ModuleType::Ecmascript {
+                                transforms: prepend.extend(transforms).extend(*append),
+                                options,
+                            }),
+                            Some(ModuleType::Typescript {
+                                transforms,
+                                tsx,
+                                analyze_types,
+                                options,
+                            }) => Some(ModuleType::Typescript {
+                                transforms: prepend.extend(transforms).extend(*append),
+                                tsx,
+                                analyze_types,
+                                options,
+                            }),
+                            Some(ModuleType::Mdx {
+                                transforms,
+                                options,
+                            }) => Some(ModuleType::Mdx {
+                                transforms: prepend.extend(transforms).extend(*append),
+                                options,
+                            }),
+                            Some(module_type) => {
+                                ModuleIssue {
+                                    ident,
+                                    title: StyledString::Text("Invalid module type".to_string())
+                                        .cell(),
+                                    description: StyledString::Text(
+                                        "The module type must be Ecmascript or Typescript to add \
+                                         Ecmascript transforms"
+                                            .to_string(),
+                                    )
+                                    .cell(),
+                                }
+                                .cell()
+                                .emit();
+                                Some(module_type)
                             }
-                        }
-                        ModuleRuleEffect::ModuleType(module) => {
-                            current_module_type = Some(*module);
-                        }
-                        ModuleRuleEffect::AddEcmascriptTransforms(additional_transforms) => {
-                            current_module_type = match current_module_type {
-                                Some(ModuleType::Ecmascript {
-                                    transforms,
-                                    options,
-                                }) => Some(ModuleType::Ecmascript {
-                                    transforms: transforms.extend(*additional_transforms),
-                                    options,
-                                }),
-                                Some(ModuleType::Typescript {
-                                    transforms,
-                                    options,
-                                }) => Some(ModuleType::Typescript {
-                                    transforms: transforms.extend(*additional_transforms),
-                                    options,
-                                }),
-                                Some(ModuleType::TypescriptWithTypes {
-                                    transforms,
-                                    options,
-                                }) => Some(ModuleType::TypescriptWithTypes {
-                                    transforms: transforms.extend(*additional_transforms),
-                                    options,
-                                }),
-                                Some(module_type) => {
-                                    ModuleIssue {
-                                        ident,
-                                        title: StringVc::cell("Invalid module type".to_string()),
-                                        description: StringVc::cell(
-                                            "The module type must be Ecmascript or Typescript to \
-                                             add Ecmascript transforms"
-                                                .to_string(),
-                                        ),
-                                    }
-                                    .cell()
-                                    .as_issue()
-                                    .emit();
-                                    Some(module_type)
+                            None => {
+                                ModuleIssue {
+                                    ident,
+                                    title: StyledString::Text("Missing module type".to_string())
+                                        .cell(),
+                                    description: StyledString::Text(
+                                        "The module type effect must be applied before adding \
+                                         Ecmascript transforms"
+                                            .to_string(),
+                                    )
+                                    .cell(),
                                 }
-                                None => {
-                                    ModuleIssue {
-                                        ident,
-                                        title: StringVc::cell("Missing module type".to_string()),
-                                        description: StringVc::cell(
-                                            "The module type effect must be applied before adding \
-                                             Ecmascript transforms"
-                                                .to_string(),
-                                        ),
-                                    }
-                                    .cell()
-                                    .as_issue()
-                                    .emit();
-                                    None
-                                }
-                            };
-                        }
-                        ModuleRuleEffect::Custom => {
-                            todo!("Custom module rule effects are not yet supported");
-                        }
+                                .cell()
+                                .emit();
+                                None
+                            }
+                        };
                     }
                 }
             }
         }
-
-        let module_type = current_module_type.unwrap_or(ModuleType::Raw).cell();
-
-        Ok(apply_module_type(
-            current_source,
-            self_vc,
-            module_type,
-            part,
-        ))
     }
+
+    let module_type = current_module_type.unwrap_or(ModuleType::Raw).cell();
+
+    Ok(apply_module_type(
+        current_source,
+        module_asset_context,
+        module_type,
+        Value::new(reference_type.clone()),
+        part,
+        inner_assets,
+        matches!(reference_type, ReferenceType::Runtime),
+    ))
 }
 
 #[turbo_tasks::value_impl]
 impl AssetContext for ModuleAssetContext {
     #[turbo_tasks::function]
-    fn compile_time_info(&self) -> CompileTimeInfoVc {
+    fn compile_time_info(&self) -> Vc<CompileTimeInfo> {
         self.compile_time_info
     }
 
     #[turbo_tasks::function]
+    fn layer(&self) -> Vc<String> {
+        self.layer
+    }
+
+    #[turbo_tasks::function]
     async fn resolve_options(
-        &self,
-        origin_path: FileSystemPathVc,
+        self: Vc<Self>,
+        origin_path: Vc<FileSystemPath>,
         _reference_type: Value<ReferenceType>,
-    ) -> Result<ResolveOptionsVc> {
+    ) -> Result<Vc<ResolveOptions>> {
+        let this = self.await?;
+        let module_asset_context = if let Some(transition) = this.transition {
+            transition.process_context(self)
+        } else {
+            self
+        };
         // TODO move `apply_commonjs/esm_resolve_options` etc. to here
         Ok(resolve_options(
             origin_path.parent().resolve().await?,
-            self.resolve_options_context,
+            module_asset_context.await?.resolve_options_context,
         ))
     }
 
     #[turbo_tasks::function]
     async fn resolve_asset(
-        self_vc: ModuleAssetContextVc,
-        origin_path: FileSystemPathVc,
-        request: RequestVc,
-        resolve_options: ResolveOptionsVc,
+        self: Vc<Self>,
+        origin_path: Vc<FileSystemPath>,
+        request: Vc<Request>,
+        resolve_options: Vc<ResolveOptions>,
         reference_type: Value<ReferenceType>,
-    ) -> Result<ResolveResultVc> {
+    ) -> Result<Vc<ModuleResolveResult>> {
         let context_path = origin_path.parent().resolve().await?;
 
-        let result = resolve(context_path, request, resolve_options);
-        let result = self_vc.process_resolve_result(result, reference_type);
+        let result = resolve(
+            context_path,
+            reference_type.clone(),
+            request,
+            resolve_options,
+        );
+        let mut result = self.process_resolve_result(result.resolve().await?, reference_type);
 
-        if *self_vc.is_types_resolving_enabled().await? {
-            let types_reference = TypescriptTypesAssetReferenceVc::new(
-                PlainResolveOriginVc::new(self_vc.into(), origin_path).into(),
+        if *self.is_types_resolving_enabled().await? {
+            let types_result = type_resolve(
+                Vc::upcast(PlainResolveOrigin::new(Vc::upcast(self), origin_path)),
                 request,
             );
 
-            result.add_reference(types_reference.into());
+            result = ModuleResolveResult::alternatives(vec![result, types_result]);
         }
 
         Ok(result)
@@ -415,121 +608,142 @@ impl AssetContext for ModuleAssetContext {
 
     #[turbo_tasks::function]
     async fn process_resolve_result(
-        self_vc: ModuleAssetContextVc,
-        result: ResolveResultVc,
+        self: Vc<Self>,
+        result: Vc<ResolveResult>,
         reference_type: Value<ReferenceType>,
-    ) -> Result<ResolveResultVc> {
+    ) -> Result<Vc<ModuleResolveResult>> {
+        let this = self.await?;
+        let transition = this.transition;
         Ok(result
             .await?
-            .map(
-                |a| self_vc.process(a, reference_type.clone()).resolve(),
-                |i| async move { Ok(i) },
-            )
+            .map_module(|source| {
+                let reference_type = reference_type.clone();
+                async move {
+                    let process_result = if let Some(transition) = transition {
+                        transition.process(source, self, reference_type)
+                    } else {
+                        self.process_default(source, reference_type)
+                    };
+                    Ok(match *process_result.await? {
+                        ProcessResult::Module(m) => ModuleResolveResultItem::Module(Vc::upcast(m)),
+                        ProcessResult::Ignore => ModuleResolveResultItem::Ignore,
+                    })
+                }
+            })
             .await?
             .into())
     }
+
     #[turbo_tasks::function]
     async fn process(
-        self_vc: ModuleAssetContextVc,
-        asset: AssetVc,
+        self: Vc<Self>,
+        asset: Vc<Box<dyn Source>>,
         reference_type: Value<ReferenceType>,
-    ) -> Result<AssetVc> {
-        let this = self_vc.await?;
+    ) -> Result<Vc<ProcessResult>> {
+        let this = self.await?;
         if let Some(transition) = this.transition {
-            Ok(transition.process(asset, self_vc, reference_type))
+            Ok(transition.process(asset, self, reference_type))
         } else {
-            Ok(self_vc.process_default(asset, reference_type))
+            Ok(self.process_default(asset, reference_type))
         }
     }
 
     #[turbo_tasks::function]
-    async fn with_transition(&self, transition: &str) -> Result<AssetContextVc> {
+    async fn with_transition(&self, transition: String) -> Result<Vc<Box<dyn AssetContext>>> {
         Ok(
-            if let Some(transition) = self.transitions.await?.get(transition) {
-                ModuleAssetContextVc::new_transition(
+            if let Some(transition) = self.transitions.await?.get(&transition) {
+                Vc::upcast(ModuleAssetContext::new_transition(
                     self.transitions,
                     self.compile_time_info,
                     self.module_options_context,
                     self.resolve_options_context,
+                    self.layer,
                     *transition,
-                )
-                .into()
+                ))
             } else {
                 // TODO report issue
-                ModuleAssetContextVc::new(
+                Vc::upcast(ModuleAssetContext::new(
                     self.transitions,
                     self.compile_time_info,
                     self.module_options_context,
                     self.resolve_options_context,
-                )
-                .into()
+                    self.layer,
+                ))
             },
         )
     }
 }
 
 #[turbo_tasks::function]
-pub async fn emit_with_completion(asset: AssetVc, output_dir: FileSystemPathVc) -> CompletionVc {
+pub async fn emit_with_completion(
+    asset: Vc<Box<dyn OutputAsset>>,
+    output_dir: Vc<FileSystemPath>,
+) -> Vc<Completion> {
     emit_assets_aggregated(asset, output_dir)
 }
 
 #[turbo_tasks::function]
-async fn emit_assets_aggregated(asset: AssetVc, output_dir: FileSystemPathVc) -> CompletionVc {
+async fn emit_assets_aggregated(
+    asset: Vc<Box<dyn OutputAsset>>,
+    output_dir: Vc<FileSystemPath>,
+) -> Vc<Completion> {
     let aggregated = aggregate(asset);
     emit_aggregated_assets(aggregated, output_dir)
 }
 
 #[turbo_tasks::function]
 async fn emit_aggregated_assets(
-    aggregated: AggregatedGraphVc,
-    output_dir: FileSystemPathVc,
-) -> Result<CompletionVc> {
+    aggregated: Vc<AggregatedGraph>,
+    output_dir: Vc<FileSystemPath>,
+) -> Result<Vc<Completion>> {
     Ok(match &*aggregated.content().await? {
         AggregatedGraphNodeContent::Asset(asset) => emit_asset_into_dir(*asset, output_dir),
         AggregatedGraphNodeContent::Children(children) => {
             for aggregated in children {
                 emit_aggregated_assets(*aggregated, output_dir).await?;
             }
-            CompletionVc::new()
+            Completion::new()
         }
     })
 }
 
 #[turbo_tasks::function]
-pub async fn emit_asset(asset: AssetVc) -> CompletionVc {
+pub async fn emit_asset(asset: Vc<Box<dyn OutputAsset>>) -> Vc<Completion> {
     asset.content().write(asset.ident().path())
 }
 
 #[turbo_tasks::function]
 pub async fn emit_asset_into_dir(
-    asset: AssetVc,
-    output_dir: FileSystemPathVc,
-) -> Result<CompletionVc> {
+    asset: Vc<Box<dyn OutputAsset>>,
+    output_dir: Vc<FileSystemPath>,
+) -> Result<Vc<Completion>> {
     let dir = &*output_dir.await?;
-    Ok(if asset.ident().path().await?.is_inside(dir) {
+    Ok(if asset.ident().path().await?.is_inside_ref(dir) {
         emit_asset(asset)
     } else {
-        CompletionVc::new()
+        Completion::new()
     })
 }
 
+type OutputAssetSet = HashSet<Vc<Box<dyn OutputAsset>>>;
+
 #[turbo_tasks::value(shared)]
 struct ReferencesList {
-    referenced_by: HashMap<AssetVc, HashSet<AssetVc>>,
+    referenced_by: HashMap<Vc<Box<dyn OutputAsset>>, OutputAssetSet>,
 }
 
 #[turbo_tasks::function]
-async fn compute_back_references(aggregated: AggregatedGraphVc) -> Result<ReferencesListVc> {
+async fn compute_back_references(aggregated: Vc<AggregatedGraph>) -> Result<Vc<ReferencesList>> {
     Ok(match &*aggregated.content().await? {
-        AggregatedGraphNodeContent::Asset(asset) => {
+        &AggregatedGraphNodeContent::Asset(asset) => {
             let mut referenced_by = HashMap::new();
-            for reference in all_referenced_assets(*asset).await?.iter() {
-                referenced_by.insert(*reference, [*asset].into_iter().collect());
+            for reference in asset.references().await?.iter() {
+                referenced_by.insert(*reference, [asset].into_iter().collect());
             }
             ReferencesList { referenced_by }.into()
         }
         AggregatedGraphNodeContent::Children(children) => {
-            let mut referenced_by = HashMap::<AssetVc, HashSet<AssetVc>>::new();
+            let mut referenced_by = HashMap::<Vc<Box<dyn OutputAsset>>, OutputAssetSet>::new();
             let lists = children
                 .iter()
                 .map(|child| compute_back_references(*child))
@@ -551,10 +765,13 @@ async fn compute_back_references(aggregated: AggregatedGraphVc) -> Result<Refere
 }
 
 #[turbo_tasks::function]
-async fn top_references(list: ReferencesListVc) -> Result<ReferencesListVc> {
+async fn top_references(list: Vc<ReferencesList>) -> Result<Vc<ReferencesList>> {
     let list = list.await?;
     const N: usize = 5;
-    let mut top = Vec::<(&AssetVc, &HashSet<AssetVc>)>::new();
+    let mut top = Vec::<(
+        &Vc<Box<dyn OutputAsset>>,
+        &HashSet<Vc<Box<dyn OutputAsset>>>,
+    )>::new();
     for tuple in list.referenced_by.iter() {
         let mut current = tuple;
         for item in &mut top {
@@ -586,5 +803,6 @@ pub fn register() {
     turbopack_mdx::register();
     turbopack_json::register();
     turbopack_static::register();
+    turbopack_wasm::register();
     include!(concat!(env!("OUT_DIR"), "/register.rs"));
 }

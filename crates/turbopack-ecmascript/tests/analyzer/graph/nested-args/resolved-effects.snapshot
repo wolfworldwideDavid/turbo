@@ -1,9 +1,10 @@
-0 -> 1 call = (...) => (undefined | y)(1)
+0 -> 1 call = (...) => y(1)
 
-0 -> 2 call = (undefined | (...) => (undefined | (a + b)))(2)
+0 -> 2 call = (...) => (a + b)(2)
 
 0 -> 3 conditional = (???*0* === 0)
 - *0* unsupported expression
+  ⚠️  This value might have side effects
 
 3 -> 4 call = (...) => (undefined | a | (r((a + 1)) + 1))((???*0* + 1))
 - *0* arguments[0]
@@ -11,6 +12,6 @@
 
 0 -> 5 call = (...) => (undefined | a | (r((a + 1)) + 1))(2)
 
-0 -> 6 call = (...) => (undefined | (a + b))("b")
+0 -> 6 call = (...) => (a + b)("b")
 
-0 -> 7 call = (...) => (undefined | inner("b"))("a")
+0 -> 7 call = (...) => inner("b")("a")

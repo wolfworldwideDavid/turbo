@@ -1,12 +1,12 @@
 use anyhow::Result;
-use turbo_tasks::primitives::StringVc;
-use turbo_tasks_fs::FileSystemPathVc;
+use turbo_tasks::Vc;
+use turbo_tasks_fs::FileSystemPath;
 
-use super::{Issue, IssueSeverity, IssueSeverityVc, IssueVc};
+use super::{Issue, IssueSeverity, OptionStyledString, StyledString};
 
 #[turbo_tasks::value(shared)]
 pub struct UnsupportedModuleIssue {
-    pub context: FileSystemPathVc,
+    pub file_path: Vc<FileSystemPath>,
     pub package: String,
     pub package_path: Option<String>,
 }
@@ -14,30 +14,44 @@ pub struct UnsupportedModuleIssue {
 #[turbo_tasks::value_impl]
 impl Issue for UnsupportedModuleIssue {
     #[turbo_tasks::function]
-    fn severity(&self) -> IssueSeverityVc {
+    fn severity(&self) -> Vc<IssueSeverity> {
         IssueSeverity::Warning.into()
     }
 
     #[turbo_tasks::function]
-    fn category(&self) -> StringVc {
-        StringVc::cell("resolve".to_string())
+    fn category(&self) -> Vc<String> {
+        Vc::cell("resolve".to_string())
     }
 
     #[turbo_tasks::function]
-    fn title(&self) -> StringVc {
-        StringVc::cell("Unsupported module".into())
+    fn title(&self) -> Vc<StyledString> {
+        StyledString::Text("Unsupported module".into()).cell()
     }
 
     #[turbo_tasks::function]
-    fn context(&self) -> FileSystemPathVc {
-        self.context
+    fn file_path(&self) -> Vc<FileSystemPath> {
+        self.file_path
     }
 
     #[turbo_tasks::function]
-    async fn description(&self) -> Result<StringVc> {
-        Ok(StringVc::cell(match &self.package_path {
-            Some(path) => format!("The module {}{} is not yet supported", self.package, path),
-            None => format!("The package {} is not yet supported", self.package),
-        }))
+    async fn description(&self) -> Result<Vc<OptionStyledString>> {
+        Ok(Vc::cell(Some(
+            StyledString::Line(vec![
+                StyledString::Text("The ".to_string()),
+                StyledString::Text(
+                    match &self.package_path {
+                        Some(_) => "module",
+                        None => "package",
+                    }
+                    .to_string(),
+                ),
+                StyledString::Code(match &self.package_path {
+                    Some(path) => format!(" {}{}", self.package, path),
+                    None => format!(" {}", self.package),
+                }),
+                StyledString::Text(" is not yet supported".to_string()),
+            ])
+            .cell(),
+        )))
     }
 }

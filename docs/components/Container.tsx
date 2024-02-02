@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 
-type Props = {
+interface ContainerProps {
   children?: ReactNode;
-};
+}
 
-export const Container = ({ children }: Props) => {
+export function Container({ children }: ContainerProps) {
   return <div className="mx-auto max-w-7xl sm:px-6 lg:px-8">{children}</div>;
-};
+}

@@ -18,22 +18,30 @@ export function useTurboSite(): TurboSite | undefined {
   return undefined;
 }
 
-function SiteSwitcherLink({ href, text, isActive }) {
+function SiteSwitcherLink({
+  href,
+  text,
+  isActive,
+}: {
+  href: string;
+  text: string;
+  isActive: boolean;
+}) {
   const classes =
     "py-1 transition-colors duration-300 inline-block w-[50px] cursor-pointer hover:text-black dark:hover:text-white";
 
   const conditionalClasses = {
-    "text-black dark:text-white": !!isActive,
+    "text-black dark:text-white": Boolean(isActive),
   };
 
   return (
-    <Link href={href} className={cn(classes, conditionalClasses)}>
+    <Link className={cn(classes, conditionalClasses)} href={href}>
       {text}
     </Link>
   );
 }
 
-function SiteSwitcher() {
+export function SiteSwitcher() {
   const site = useTurboSite();
 
   return (
@@ -56,11 +64,9 @@ function SiteSwitcher() {
           { "hover:text-black dark:hover:text-white": site }
         )}
       >
-        <SiteSwitcherLink href="/repo" text="Repo" isActive={site === "repo"} />
-        <SiteSwitcherLink href="/pack" text="Pack" isActive={site === "pack"} />
+        <SiteSwitcherLink href="/repo" isActive={site === "repo"} text="Repo" />
+        <SiteSwitcherLink href="/pack" isActive={site === "pack"} text="Pack" />
       </span>
     </div>
   );
 }
-
-export default SiteSwitcher;

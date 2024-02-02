@@ -19,17 +19,16 @@ use swc_core::{
         visit::VisitMutWith,
     },
 };
-use turbo_tasks::{
-    primitives::{StringVc, U64Vc},
-    Value, ValueToString,
-};
-use turbo_tasks_fs::{FileContent, FileSystemPath, FileSystemPathVc};
+use tracing::Instrument;
+use turbo_tasks::{util::WrapFuture, Value, ValueToString, Vc};
+use turbo_tasks_fs::{FileContent, FileSystemPath};
 use turbo_tasks_hash::hash_xxh3_hash64;
 use turbopack_core::{
-    asset::{Asset, AssetContent, AssetVc},
+    asset::{Asset, AssetContent},
     error::PrettyPrintError,
-    issue::{Issue, IssueSeverity, IssueSeverityVc, IssueVc},
-    source_map::{GenerateSourceMap, GenerateSourceMapVc, OptionSourceMapVc},
+    issue::{Issue, IssueExt, IssueSeverity, OptionStyledString, StyledString},
+    source::Source,
+    source_map::{GenerateSourceMap, OptionSourceMap, SourceMap},
     SOURCE_MAP_ROOT_NAME,
 };
 use turbopack_swc_utils::emitter::IssueEmitter;
@@ -37,8 +36,8 @@ use turbopack_swc_utils::emitter::IssueEmitter;
 use super::EcmascriptModuleAssetType;
 use crate::{
     analyzer::graph::EvalContext,
-    transform::{EcmascriptInputTransformsVc, TransformContext},
-    utils::WrapFuture,
+    swc_comments::ImmutableComments,
+    transform::{EcmascriptInputTransforms, TransformContext},
     EcmascriptInputTransform,
 };
 
@@ -49,7 +48,7 @@ pub enum ParseResult {
         #[turbo_tasks(trace_ignore)]
         program: Program,
         #[turbo_tasks(debug_ignore, trace_ignore)]
-        comments: SwcComments,
+        comments: Arc<ImmutableComments>,
         #[turbo_tasks(debug_ignore, trace_ignore)]
         eval_context: EvalContext,
         #[turbo_tasks(debug_ignore, trace_ignore)]
@@ -73,31 +72,35 @@ impl PartialEq for ParseResult {
 #[turbo_tasks::value(shared, serialization = "none", eq = "manual")]
 pub struct ParseResultSourceMap {
     /// Confusingly, SWC's SourceMap is not a mapping of transformed locations
-    /// to source locations. I don't know what it is, really, but it's not
-    /// that.
+    /// to source locations. It's a map of filesnames to file contents.
     #[turbo_tasks(debug_ignore, trace_ignore)]
-    source_map: Arc<swc_core::common::SourceMap>,
+    files_map: Arc<swc_core::common::SourceMap>,
 
-    /// The position mappings that can generate a real source map given a (SWC)
-    /// SourceMap.
+    /// The position mappings that can generate a real source map.
     #[turbo_tasks(debug_ignore, trace_ignore)]
     mappings: Vec<(BytePos, LineCol)>,
+
+    /// An input's original source map, if one exists. This will be used to
+    /// trace locations back to the input's pre-transformed sources.
+    original_source_map: Option<Vc<SourceMap>>,
 }
 
 impl PartialEq for ParseResultSourceMap {
     fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.source_map, &other.source_map) && self.mappings == other.mappings
+        Arc::ptr_eq(&self.files_map, &other.files_map) && self.mappings == other.mappings
     }
 }
 
 impl ParseResultSourceMap {
     pub fn new(
-        source_map: Arc<swc_core::common::SourceMap>,
+        files_map: Arc<swc_core::common::SourceMap>,
         mappings: Vec<(BytePos, LineCol)>,
+        original_source_map: Option<Vc<SourceMap>>,
     ) -> Self {
         ParseResultSourceMap {
-            source_map,
+            files_map,
             mappings,
+            original_source_map,
         }
     }
 }
@@ -105,15 +108,23 @@ impl ParseResultSourceMap {
 #[turbo_tasks::value_impl]
 impl GenerateSourceMap for ParseResultSourceMap {
     #[turbo_tasks::function]
-    fn generate_source_map(&self) -> OptionSourceMapVc {
-        let map = self.source_map.build_source_map_with_config(
+    async fn generate_source_map(&self) -> Result<Vc<OptionSourceMap>> {
+        let original_src_map = if let Some(input) = self.original_source_map {
+            Some(input.await?.to_source_map().await?)
+        } else {
+            None
+        };
+        let input_map = if let Some(map) = original_src_map.as_ref() {
+            map.as_regular_source_map()
+        } else {
+            None
+        };
+        let map = self.files_map.build_source_map_with_config(
             &self.mappings,
-            None,
+            input_map.as_deref(),
             InlineSourcesContentConfig {},
         );
-        OptionSourceMapVc::cell(Some(
-            turbopack_core::source_map::SourceMap::new_regular(map).cell(),
-        ))
+        Ok(Vc::cell(Some(SourceMap::new_regular(map).cell())))
     }
 }
 
@@ -139,11 +150,16 @@ impl SourceMapGenConfig for InlineSourcesContentConfig {
 
 #[turbo_tasks::function]
 pub async fn parse(
-    source: AssetVc,
+    source: Vc<Box<dyn Source>>,
     ty: Value<EcmascriptModuleAssetType>,
-    transforms: EcmascriptInputTransformsVc,
-) -> Result<ParseResultVc> {
-    match parse_internal(source, ty, transforms).await {
+    transforms: Vc<EcmascriptInputTransforms>,
+) -> Result<Vc<ParseResult>> {
+    let name = source.ident().to_string().await?;
+    let span = tracing::info_span!("parse ecmascript", name = *name, ty = display(&*ty));
+    match parse_internal(source, ty, transforms)
+        .instrument(span)
+        .await
+    {
         Ok(result) => Ok(result),
         Err(error) => Err(error.context(format!(
             "failed to parse {}",
@@ -153,15 +169,15 @@ pub async fn parse(
 }
 
 async fn parse_internal(
-    source: AssetVc,
+    source: Vc<Box<dyn Source>>,
     ty: Value<EcmascriptModuleAssetType>,
-    transforms: EcmascriptInputTransformsVc,
-) -> Result<ParseResultVc> {
+    transforms: Vc<EcmascriptInputTransforms>,
+) -> Result<Vc<ParseResult>> {
     let content = source.content();
     let fs_path_vc = source.ident().path();
     let fs_path = &*fs_path_vc.await?;
     let ident = &*source.ident().to_string().await?;
-    let file_path_hash = *hash_ident(source.ident().to_string()).await? as u128;
+    let file_path_hash = hash_xxh3_hash64(&*source.ident().to_string().await?) as u128;
     let ty = ty.into_value();
     let content = match content.await {
         Ok(content) => content,
@@ -171,7 +187,6 @@ async fn parse_internal(
                 error: PrettyPrintError(&error).to_string(),
             }
             .cell()
-            .as_issue()
             .emit();
             return Ok(ParseResult::Unparseable.cell());
         }
@@ -209,7 +224,6 @@ async fn parse_internal(
                         error: PrettyPrintError(&error).to_string(),
                     }
                     .cell()
-                    .as_issue()
                     .emit();
                     ParseResult::Unparseable.cell()
                 }
@@ -221,14 +235,14 @@ async fn parse_internal(
 
 async fn parse_content(
     string: String,
-    fs_path_vc: FileSystemPathVc,
+    fs_path_vc: Vc<FileSystemPath>,
     fs_path: &FileSystemPath,
     ident: &str,
     file_path_hash: u128,
-    source: AssetVc,
+    source: Vc<Box<dyn Source>>,
     ty: EcmascriptModuleAssetType,
     transforms: &[EcmascriptInputTransform],
-) -> Result<ParseResultVc> {
+) -> Result<Vc<ParseResult>> {
     let source_map: Arc<swc_core::common::SourceMap> = Default::default();
     let handler = Handler::with_emitter(
         true,
@@ -243,11 +257,6 @@ async fn parse_content(
     let globals_ref = &globals;
     let helpers = GLOBALS.set(globals_ref, || Helpers::new(true));
     let mut result = WrapFuture::new(
-        |f, cx| {
-            GLOBALS.set(globals_ref, || {
-                HANDLER.set(&handler, || HELPERS.set(&helpers, || f.poll(cx)))
-            })
-        },
         async {
             let file_name = FileName::Custom(ident.to_string());
             let fm = source_map.new_source_file(file_name.clone(), string);
@@ -263,18 +272,18 @@ async fn parse_content(
                             decorators: true,
                             decorators_before_export: true,
                             export_default_from: true,
-                            import_assertions: true,
+                            import_attributes: true,
                             allow_super_outside_method: true,
                             allow_return_outside_function: true,
                             auto_accessors: true,
+                            explicit_resource_management: true,
                         }),
-                        EcmascriptModuleAssetType::Typescript
-                        | EcmascriptModuleAssetType::TypescriptWithTypes => {
+                        EcmascriptModuleAssetType::Typescript { tsx, .. } => {
                             Syntax::Typescript(TsConfig {
                                 decorators: true,
                                 dts: false,
                                 no_early_errors: true,
-                                tsx: true,
+                                tsx,
                                 disallow_ambiguous_jsx_like: false,
                             })
                         }
@@ -283,7 +292,7 @@ async fn parse_content(
                                 decorators: true,
                                 dts: true,
                                 no_early_errors: true,
-                                tsx: true,
+                                tsx: false,
                                 disallow_ambiguous_jsx_like: false,
                             })
                         }
@@ -294,6 +303,7 @@ async fn parse_content(
                 );
 
                 let mut parser = Parser::new_from(lexer);
+                let program_result = parser.parse_program();
 
                 let mut has_errors = false;
                 for e in parser.take_errors() {
@@ -305,7 +315,7 @@ async fn parse_content(
                     return Ok(ParseResult::Unparseable);
                 }
 
-                match parser.parse_program() {
+                match program_result {
                     Ok(parsed_program) => parsed_program,
                     Err(e) => {
                         e.into_diagnostic(&handler).emit();
@@ -319,8 +329,7 @@ async fn parse_content(
 
             let is_typescript = matches!(
                 ty,
-                EcmascriptModuleAssetType::Typescript
-                    | EcmascriptModuleAssetType::TypescriptWithTypes
+                EcmascriptModuleAssetType::Typescript { .. }
                     | EcmascriptModuleAssetType::TypescriptDeclaration
             );
             parsed_program.visit_mut_with(&mut resolver(
@@ -329,7 +338,7 @@ async fn parse_content(
                 is_typescript,
             ));
 
-            let context = TransformContext {
+            let transform_context = TransformContext {
                 comments: &comments,
                 source_map: &source_map,
                 top_level_mark,
@@ -340,23 +349,30 @@ async fn parse_content(
                 file_path: fs_path_vc,
             };
             for transform in transforms.iter() {
-                transform.apply(&mut parsed_program, &context).await?;
+                transform
+                    .apply(&mut parsed_program, &transform_context)
+                    .await?;
             }
 
             parsed_program.visit_mut_with(
                 &mut swc_core::ecma::transforms::base::helpers::inject_helpers(unresolved_mark),
             );
 
-            let eval_context = EvalContext::new(&parsed_program, unresolved_mark);
+            let eval_context = EvalContext::new(&parsed_program, unresolved_mark, Some(source));
 
             Ok::<ParseResult, anyhow::Error>(ParseResult::Ok {
                 program: parsed_program,
-                comments,
+                comments: Arc::new(ImmutableComments::new(comments)),
                 eval_context,
                 // Temporary globals as the current one can't be moved yet, since they are
                 // borrowed
                 globals: Arc::new(Globals::new()),
                 source_map,
+            })
+        },
+        |f, cx| {
+            GLOBALS.set(globals_ref, || {
+                HANDLER.set(&handler, || HELPERS.set(&helpers, || f.poll(cx)))
             })
         },
     )
@@ -371,48 +387,42 @@ async fn parse_content(
     Ok(result.cell())
 }
 
-#[turbo_tasks::function]
-async fn hash_ident(ident: StringVc) -> Result<U64Vc> {
-    let ident = &*ident.await?;
-    Ok(U64Vc::cell(hash_xxh3_hash64(ident)))
-}
-
 #[turbo_tasks::value]
 struct ReadSourceIssue {
-    source: AssetVc,
+    source: Vc<Box<dyn Source>>,
     error: String,
 }
 
 #[turbo_tasks::value_impl]
 impl Issue for ReadSourceIssue {
     #[turbo_tasks::function]
-    fn context(&self) -> FileSystemPathVc {
+    fn file_path(&self) -> Vc<FileSystemPath> {
         self.source.ident().path()
     }
 
     #[turbo_tasks::function]
-    fn title(&self) -> StringVc {
-        StringVc::cell("Reading source code for parsing failed".to_string())
+    fn title(&self) -> Vc<StyledString> {
+        StyledString::Text("Reading source code for parsing failed".to_string()).cell()
     }
 
     #[turbo_tasks::function]
-    fn description(&self) -> StringVc {
-        StringVc::cell(
-            format!(
+    fn description(&self) -> Vc<OptionStyledString> {
+        Vc::cell(Some(
+            StyledString::Text(format!(
                 "An unexpected error happened while trying to read the source code to parse: {}",
                 self.error
-            )
-            .into(),
-        )
+            ))
+            .cell(),
+        ))
     }
 
     #[turbo_tasks::function]
-    fn severity(&self) -> IssueSeverityVc {
+    fn severity(&self) -> Vc<IssueSeverity> {
         IssueSeverity::Error.cell()
     }
 
     #[turbo_tasks::function]
-    fn category(&self) -> StringVc {
-        StringVc::cell("parse".to_string())
+    fn category(&self) -> Vc<String> {
+        Vc::cell("parse".to_string())
     }
 }

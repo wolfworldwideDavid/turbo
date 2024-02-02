@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    // type checking
+    "strict": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true,
+
+    // environment
+    "target": "ESNext",
+
+    // modules
+    "baseUrl": ".",
+    "module": "CommonJS",
+
+    // emit
+    "noEmit": true,
+    "stripInternal": true
+  }
+}

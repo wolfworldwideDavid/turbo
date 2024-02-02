@@ -3,70 +3,68 @@ use swc_core::{
     ecma::ast::{Callee, ExprOrSpread},
     quote_expr,
 };
-use turbo_tasks::{primitives::StringVc, Value, ValueToString, ValueToStringVc};
+use turbo_tasks::{Value, ValueToString, Vc};
 use turbopack_core::{
-    chunk::{
-        availability_info::AvailabilityInfo, ChunkableAssetReference, ChunkableAssetReferenceVc,
-        ChunkingType, ChunkingTypeOptionVc,
-    },
-    issue::{IssueSourceVc, OptionIssueSourceVc},
-    reference::{AssetReference, AssetReferenceVc},
+    chunk::{ChunkableModuleReference, ChunkingContext, ChunkingType, ChunkingTypeOption},
+    environment::ChunkLoading,
+    issue::IssueSource,
+    reference::ModuleReference,
     reference_type::EcmaScriptModulesReferenceSubType,
-    resolve::{origin::ResolveOriginVc, parse::RequestVc, ResolveResultVc},
+    resolve::{origin::ResolveOrigin, parse::Request, ModuleResolveResult},
 };
 
-use super::super::pattern_mapping::{PatternMapping, PatternMappingVc, ResolveType::EsmAsync};
+use super::super::pattern_mapping::{PatternMapping, ResolveType};
 use crate::{
-    chunk::EcmascriptChunkingContextVc,
-    code_gen::{
-        CodeGenerateableWithAvailabilityInfo, CodeGenerateableWithAvailabilityInfoVc,
-        CodeGeneration, CodeGenerationVc,
-    },
+    chunk::EcmascriptChunkingContext,
+    code_gen::{CodeGenerateable, CodeGeneration},
     create_visitor,
-    references::AstPathVc,
+    references::AstPath,
     resolve::{esm_resolve, try_to_severity},
 };
 
 #[turbo_tasks::value]
 #[derive(Hash, Debug)]
 pub struct EsmAsyncAssetReference {
-    pub origin: ResolveOriginVc,
-    pub request: RequestVc,
-    pub path: AstPathVc,
-    pub issue_source: IssueSourceVc,
+    pub origin: Vc<Box<dyn ResolveOrigin>>,
+    pub request: Vc<Request>,
+    pub path: Vc<AstPath>,
+    pub issue_source: Vc<IssueSource>,
     pub in_try: bool,
+    pub import_externals: bool,
 }
 
 #[turbo_tasks::value_impl]
-impl EsmAsyncAssetReferenceVc {
+impl EsmAsyncAssetReference {
     #[turbo_tasks::function]
     pub fn new(
-        origin: ResolveOriginVc,
-        request: RequestVc,
-        path: AstPathVc,
-        issue_source: IssueSourceVc,
+        origin: Vc<Box<dyn ResolveOrigin>>,
+        request: Vc<Request>,
+        path: Vc<AstPath>,
+        issue_source: Vc<IssueSource>,
         in_try: bool,
-    ) -> Self {
+        import_externals: bool,
+    ) -> Vc<Self> {
         Self::cell(EsmAsyncAssetReference {
             origin,
             request,
             path,
             issue_source,
             in_try,
+            import_externals,
         })
     }
 }
 
 #[turbo_tasks::value_impl]
-impl AssetReference for EsmAsyncAssetReference {
+impl ModuleReference for EsmAsyncAssetReference {
     #[turbo_tasks::function]
-    fn resolve_reference(&self) -> ResolveResultVc {
+    fn resolve_reference(&self) -> Vc<ModuleResolveResult> {
         esm_resolve(
             self.origin,
             self.request,
             Default::default(),
-            OptionIssueSourceVc::some(self.issue_source),
             try_to_severity(self.in_try),
+            Some(self.issue_source),
         )
     }
 }
@@ -74,8 +72,8 @@ impl AssetReference for EsmAsyncAssetReference {
 #[turbo_tasks::value_impl]
 impl ValueToString for EsmAsyncAssetReference {
     #[turbo_tasks::function]
-    async fn to_string(&self) -> Result<StringVc> {
-        Ok(StringVc::cell(format!(
+    async fn to_string(&self) -> Result<Vc<String>> {
+        Ok(Vc::cell(format!(
             "dynamic import {}",
             self.request.to_string().await?,
         )))
@@ -83,37 +81,44 @@ impl ValueToString for EsmAsyncAssetReference {
 }
 
 #[turbo_tasks::value_impl]
-impl ChunkableAssetReference for EsmAsyncAssetReference {
+impl ChunkableModuleReference for EsmAsyncAssetReference {
     #[turbo_tasks::function]
-    fn chunking_type(&self) -> ChunkingTypeOptionVc {
-        ChunkingTypeOptionVc::cell(Some(ChunkingType::SeparateAsync))
+    fn chunking_type(&self) -> Vc<ChunkingTypeOption> {
+        Vc::cell(Some(ChunkingType::Async))
     }
 }
 
 #[turbo_tasks::value_impl]
-impl CodeGenerateableWithAvailabilityInfo for EsmAsyncAssetReference {
+impl CodeGenerateable for EsmAsyncAssetReference {
     #[turbo_tasks::function]
     async fn code_generation(
         &self,
-        context: EcmascriptChunkingContextVc,
-        availability_info: Value<AvailabilityInfo>,
-    ) -> Result<CodeGenerationVc> {
-        let pm = PatternMappingVc::resolve_request(
+        chunking_context: Vc<Box<dyn EcmascriptChunkingContext>>,
+    ) -> Result<Vc<CodeGeneration>> {
+        let pm = PatternMapping::resolve_request(
             self.request,
             self.origin,
-            context.into(),
+            Vc::upcast(chunking_context),
             esm_resolve(
                 self.origin,
                 self.request,
-                Value::new(EcmaScriptModulesReferenceSubType::Undefined),
-                OptionIssueSourceVc::some(self.issue_source),
+                Value::new(EcmaScriptModulesReferenceSubType::DynamicImport),
                 try_to_severity(self.in_try),
+                Some(self.issue_source),
             ),
-            Value::new(EsmAsync(availability_info.into_value())),
+            if matches!(
+                *chunking_context.environment().chunk_loading().await?,
+                ChunkLoading::None
+            ) {
+                Value::new(ResolveType::ChunkItem)
+            } else {
+                Value::new(ResolveType::AsyncChunkLoader)
+            },
         )
         .await?;
 
         let path = &self.path.await?;
+        let import_externals = self.import_externals;
 
         let visitor = match &*pm {
             PatternMapping::Invalid => {
@@ -158,6 +163,30 @@ impl CodeGenerateableWithAvailabilityInfo for EsmAsyncAssetReference {
                     call_expr.args = vec![
                         ExprOrSpread { spread: None, expr: quote_expr!("__turbopack_import__") },
                     ];
+                })
+            }
+            PatternMapping::OriginalReferenceTypeExternal(_)
+            | PatternMapping::OriginalReferenceExternal => {
+                create_visitor!(exact path, visit_mut_call_expr(call_expr: &mut CallExpr) {
+                    let old_args = std::mem::take(&mut call_expr.args);
+                    let expr = match old_args.into_iter().next() {
+                        Some(ExprOrSpread { expr, spread: None }) => pm.apply(*expr),
+                        _ => pm.create(),
+                    };
+                    if import_externals {
+                        call_expr.callee = Callee::Expr(quote_expr!("__turbopack_external_import__"));
+                        call_expr.args = vec![
+                            ExprOrSpread { spread: None, expr: Box::new(expr) },
+                        ];
+                    } else {
+                        call_expr.callee = Callee::Expr(quote_expr!("Promise.resolve().then"));
+                        call_expr.args = vec![
+                            ExprOrSpread { spread: None, expr: quote_expr!(
+                                "() => __turbopack_external_require__($arg, true)",
+                                arg: Expr = expr
+                            ) },
+                        ];
+                    }
                 })
             }
             _ => {

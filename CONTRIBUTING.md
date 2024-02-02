@@ -5,23 +5,29 @@ Thanks for your interest in contributing to Turbo!
 **Important note**: At the moment, Turbo is made up of two tools, Turborepo and Turbopack, built with different languages and toolchains. In the future, Turbo will become a single toolchain built on Rust and the Turbo engine. In the meantime, please follow the respective guide when contributing to each tool:
 
 - [Contributing to Turbo](#contributing-to-turbo)
+  - [General Dependencies](#general-dependencies)
   - [Contributing to Turborepo](#contributing-to-turborepo)
     - [Building Turborepo](#building-turborepo)
     - [TLS Implementation](#tls-implementation)
     - [Running Turborepo Tests](#running-turborepo-tests)
-      - [Go Tests](#go-tests)
+      - [Turborepo Tests](#turborepo-tests)
   - [Debugging Turborepo](#debugging-turborepo)
   - [Benchmarking Turborepo](#benchmarking-turborepo)
   - [Updating `turbo`](#updating-turbo)
   - [Manually testing `turbo`](#manually-testing-turbo)
   - [Publishing `turbo` to the npm registry](#publishing-turbo-to-the-npm-registry)
+  - [Creating a new release blog post](#creating-a-new-release-blog-post)
   - [Adding A New Crate](#adding-a-new-crate)
   - [Contributing to Turbopack](#contributing-to-turbopack)
     - [Turbopack Architecture](#turbopack-architecture)
     - [Testing Turbopack](#testing-turbopack)
-    - [Benchmarking Turbopack](#benchmarking-turbopack)
     - [Profiling Turbopack](#profiling-turbopack)
   - [Troubleshooting](#troubleshooting)
+
+## General Dependencies
+
+- [Rust](https://www.rust-lang.org/tools/install)
+- [cargo-groups](https://github.com/nicholaslyang/cargo-groups) (used to group crates into Turborepo-specific ones and Turbopack-specific ones)
 
 ## Contributing to Turborepo
 
@@ -43,9 +49,9 @@ Building
 Turborepo uses `reqwest`, a Rust HTTP client, to make requests to the Turbo API. `reqwest` supports two TLS
 implementations: `rustls` and `native-tls`. `rustls` is a pure Rust implementation of TLS, while `native-tls`
 is a wrapper around OpenSSL. Turborepo allows users to select which implementation they want with the `native-tls`
-and `rustls-tls` features. By default, the `native-tls` feature is selected---this is done so that `cargo build` works
-out of the box. If you wish to select `rustls-tls`, you may do so by passing `--no-default-features --features rustls-tls`
-to the build command. This allows for us to build for more platforms, as `native-tls` is not supported everywhere.
+and `rustls-tls` features. By default, the `rustls-tls` feature is selected---this is done so that `cargo build` works
+out of the box. If you wish to select `native-tls`, you may do so by passing `--no-default-features --features native-tls`
+to the build command.
 
 ### Running Turborepo Tests
 
@@ -54,10 +60,10 @@ Install dependencies
 On macOS:
 
 ```bash
-brew install moreutils jq zstd # (moreutils is for sponge)
+brew install jq zstd
 ```
 
-#### Go Tests
+#### Turborepo Tests
 
 First: `npm install -g turbo`.
 
@@ -82,17 +88,16 @@ Then from the root directory, you can run:
   pnpm test -- --filter=turborepo-tests-integration
   ```
 - A single Integration test
-  e.g to run everything in `tests/run_summary`:
+  e.g to run everything in `tests/run-summary`:
+
   ```
   # build first because the next command doesn't run through turbo
   pnpm -- turbo run build --filter=cli
-  pnpm test -F turborepo-tests-integration -- "run_summary"
+  pnpm test -F turborepo-tests-integration -- "run-summary"
   ```
+
   Note: this is not through turbo, so you'll have to build turbo yourself first.
-- E2E test
-  ```bash
-  pnpm -- turbo e2e --filter=cli
-  ```
+
 - Example tests
   ```bash
   pnpm test -- --filter=turborepo-tests-examples -- <example-name> <packagemanager>
@@ -105,8 +110,7 @@ Then from the root directory, you can run:
 
 ## Benchmarking Turborepo
 
-1. `make turbo-prod`
-2. From the `benchmark/` directory, run `pnpm run benchmark`.
+Follow the instructions in the [`benchmark/README.md`](./benchmark/README.md).
 
 ## Updating `turbo`
 
@@ -135,8 +139,8 @@ Here's a checklist of testing strategies to cover:
 
 - Test `login`, `logout`, `login --sso-team`, `link`, `unlink`
 - Test `prune` (Note `turbo` here is the unreleased turbo binary)
-  - `npx create-turbo --use-pnpm prune-test && cd prune-test`
-  - `turbo --skip-infer prune --scope=docs && cd out && pnpm install --frozen-lockfile`
+  - `pnpm dlx create-turbo@latest prune-test --package-manager pnpm && cd prune-test`
+  - `turbo --skip-infer prune docs && cd out && pnpm install --frozen-lockfile`
   - `turbo --skip-infer build`
 - Test `--dry-run` and `--graph`.
 - Test with and without daemon.
@@ -159,6 +163,24 @@ These lists are by no means exhaustive. Feel free to add to them with other stra
 ## Publishing `turbo` to the npm registry
 
 See [the publishing guide](./release.md#release-turborepo).
+
+## Creating a new release blog post
+
+Creating a new release post can be done via a turborepo generator. Run the following command from anywhere within the repo:
+
+```bash
+turbo generate run "blog - release post"
+```
+
+This will walk you through creating a new blog post from start to finish.
+
+NOTE: If you would like to update the stats (github stars / npm downloads / time saved) for an existing blog post that has yet to be published (useful if time has passed since the blog post was created, and up to date stats are required before publishing) - run:
+
+```bash
+turbo generate run "blog - "blog - update release post stats"
+```
+
+and choose the blog post you would like to update.
 
 ## Adding A New Crate
 
@@ -234,7 +256,7 @@ Finally, the crate must be added to the Turborepo section of CODEOWNERS:
 
 Turbopack uses [Cargo workspaces][workspaces] in the Turbo monorepo. You'll find
 several workspaces inside the `crates/` directory. In order to run a particular
-crate, you can use the `cargo run -p [CRATE_NAME]` command. For example, to test the Next.js development server, run `cargo run -p next-dev`.
+crate, you can use the `cargo run -p [CRATE_NAME]` command.
 
 ### Turbopack Architecture
 
@@ -245,6 +267,10 @@ A high-level introduction to Turbopack's architecture, workspace crates, and Tur
 Install `cargo-nextest` (https://nexte.st/):
 
 `cargo install cargo-nextest`
+
+Then, install dependencies for testcases:
+
+`pnpm install -r --side-effects-cache -C crates/turbopack/tests/node-file-trace`
 
 Run via:
 
@@ -259,10 +285,6 @@ You can also create a little demo app and run
 ```shell
 cargo run -p node-file-trace -- print demo/index.js
 ```
-
-### Benchmarking Turbopack
-
-See [the benchmarking README for Turbopack](crates/next-dev/benches/README.md) for details.
 
 ### Profiling Turbopack
 
